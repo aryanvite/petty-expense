@@ -1,0 +1,65 @@
+# Node Modules & Dependencies
+node_modules/
+*/node_modules/
+frontend/node_modules/
+.pnp/
+.pnp.js
+
+# Python & Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+frontend/dist/
+*.egg-info/
+
+# Environment Variables & Secrets
+.env
+*.env
+backend/.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+test-results/
+.cache
+
+# Media & Database Files
+*.sqlite3
+backend/db.sqlite3
+backend/media/
+media/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Scratch & Temporary Files
+scratch/
+*.tmp
+verify_checker_page_ui.py
+
+# Editor & OS Artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
