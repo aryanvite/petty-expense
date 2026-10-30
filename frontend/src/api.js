@@ -151,6 +151,27 @@ export const deleteDepartment = async (id) => {
   return res.data;
 };
 
+// Vendor APIs
+export const fetchVendorsSummary = async (params = {}) => {
+  const res = await api.get('/vendors/summary/', { params });
+  return res.data;
+};
+
+export const fetchVendorDetail = async (vendorName) => {
+  const res = await api.get('/vendors/detail/', { params: { name: vendorName } });
+  return res.data;
+};
+
+export const createSavedVendor = async (name) => {
+  const res = await api.post('/vendors/', { name });
+  return res.data;
+};
+
+export const deleteSavedVendor = async (id) => {
+  const res = await api.delete(`/vendors/${id}/`);
+  return res.data;
+};
+
 // Request interceptor: attach Access Token
 api.interceptors.request.use(
   (config) => {

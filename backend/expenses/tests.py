@@ -254,3 +254,23 @@ class ExpenseWorkflowTests(TestCase):
         self.checker.refresh_from_db()
         # Checker's allocated_funds increased by 25,000
         self.assertEqual(self.checker.allocated_funds, 35000)
+
+    def test_super_admin_can_review_fund_request(self):
+        self.client.force_authenticate(user=self.checker)
+        req_res = self.client.post('/api/fund-requests/', {
+            'requested_amount': 25000,
+            'reason': 'Project expansion fund replenishment'
+        })
+        self.assertEqual(req_res.status_code, 201)
+
+        self.admin.role = 'SUPER_ADMIN'
+        self.admin.save(update_fields=['role'])
+        self.client.force_authenticate(user=self.admin)
+        review_res = self.client.post(
+            f"/api/fund-requests/{req_res.data['id']}/review/",
+            {'action': 'APPROVE', 'comments': 'Approved by Super Admin', 'create_voucher': False},
+            format='json'
+        )
+
+        self.assertEqual(review_res.status_code, 200)
+        self.assertEqual(review_res.data['status'], 'APPROVED')

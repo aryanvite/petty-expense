@@ -33,16 +33,22 @@ def log_audit(user, action, record_type='', record_id='', details='', request=No
     if request:
         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
         if x_forwarded_for:
-            ip = x_forwarded_for.split(',')[0]
+            ip = x_forwarded_for.split(',')[0].strip()
         else:
             ip = request.META.get('REMOTE_ADDR', '')
+    ip_addr = ip or '127.0.0.1'
+
+    # Ensure USER_LOGIN description always contains the IP address
+    if action == 'USER_LOGIN' and 'IP address' not in details and 'from IP:' not in details:
+        details = f"{details} from IP address {ip_addr}".strip()
+
     AuditLog.objects.create(
         user=user,
         action=action,
         record_type=record_type,
         record_id=str(record_id),
         details=details,
-        ip_address=ip
+        ip_address=ip_addr
     )
 
 
@@ -74,8 +80,26 @@ class LoginView(APIView):
         tokens = generate_tokens_for_user(user, remember_me=remember_me)
         user_data = UserProfileSerializer(user).data
 
+        client_ip = ''
+        if request:
+            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+            if x_forwarded_for:
+                client_ip = x_forwarded_for.split(',')[0].strip()
+            else:
+                client_ip = request.META.get('REMOTE_ADDR', '')
+        client_ip = client_ip or '127.0.0.1'
+
         duration_desc = "7 days (Remember Me enabled)" if remember_me else "1 day (24 hours)"
-        log_audit(user, 'USER_LOGIN', 'USER', user.id, f"Logged in as {user.role} with session duration: {duration_desc}", request)
+        user_name = user.full_name or user.username
+        user_role_title = user.role.title()
+        log_audit(
+            user,
+            'USER_LOGIN',
+            'USER',
+            user.id,
+            f"User {user_role_title} {user_name} logged in from IP address {client_ip} (Session duration: {duration_desc})",
+            request
+        )
 
         return Response({
             'tokens': tokens,
@@ -388,7 +412,10 @@ class DepartmentListView(APIView):
         return Response(serializer.data)
 
     def post(self, request):
-        serializer = DepartmentSerializer(data=request.data)
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'name' in data and isinstance(data['name'], str):
+            data['name'] = data['name'].strip().lower()
+        serializer = DepartmentSerializer(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         dept = serializer.save()
@@ -405,7 +432,11 @@ class DepartmentDetailView(APIView):
         except Department.DoesNotExist:
             return Response({'detail': 'Department not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = DepartmentSerializer(dept, data=request.data, partial=True)
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'name' in data and isinstance(data['name'], str):
+            data['name'] = data['name'].strip().lower()
+
+        serializer = DepartmentSerializer(dept, data=data, partial=True)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         dept = serializer.save()
@@ -419,7 +450,7 @@ class DepartmentDetailView(APIView):
             return Response({'detail': 'Department not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         # Check if users are assigned
-        users_count = User.objects.filter(department=dept.name).count()
+        users_count = User.objects.filter(models.Q(department__iexact=dept.name) | models.Q(department=dept.name_lower)).count()
         if users_count > 0:
             return Response({
                 'detail': f'Cannot delete department "{dept.name}" because {users_count} employee(s) are assigned to it. Please reassign those employees first.'
@@ -800,6 +831,36 @@ class AdminAllocateFundsView(APIView):
                 return Response({'detail': 'Funds can only be allocated to Makers and Checkers.'}, status=status.HTTP_400_BAD_REQUEST)
 
         notes = request.data.get('notes', '').strip()
+        description = request.data.get('description', '').strip() or notes
+        voucher_number = request.data.get('voucher_number', '').strip()
+        payment_type = request.data.get('payment_type', '').strip() or request.data.get('type', '').strip() or 'Cash'
+        other_payment_type = request.data.get('other_payment_type', '').strip()
+        allocation_date_str = request.data.get('allocation_date') or request.data.get('date')
+        
+        allocation_date = None
+        if allocation_date_str:
+            try:
+                from datetime import datetime
+                parsed_date = datetime.strptime(str(allocation_date_str).split('T')[0], '%Y-%m-%d').date()
+                if parsed_date > timezone.localdate():
+                    return Response({'detail': 'Allocation date cannot be in the future.'}, status=status.HTTP_400_BAD_REQUEST)
+                allocation_date = parsed_date
+            except ValueError:
+                return Response({'detail': 'Invalid date format. Expected YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            allocation_date = timezone.localdate()
+
+        valid_types = ['Cash', 'UPI', 'Credit Card', 'Debit Card', 'Other']
+        if payment_type and payment_type not in valid_types:
+            return Response({'detail': f'Payment type must be one of: {", ".join(valid_types)}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if payment_type == 'Other':
+            if not other_payment_type:
+                return Response({'detail': 'Please specify the custom payment type.'}, status=status.HTTP_400_BAD_REQUEST)
+            final_payment_type = f"Other ({other_payment_type})"
+        else:
+            final_payment_type = payment_type or 'Cash'
+
         raw_amount = request.data.get('amount')
         raw_allocated = request.data.get('allocated_funds')
 
@@ -856,15 +917,22 @@ class AdminAllocateFundsView(APIView):
                     recipient_new_balance=employee.allocated_funds,
                     allocator_previous_balance=checker_old,
                     allocator_new_balance=checker.allocated_funds,
-                    notes=notes
+                    voucher_number=voucher_number,
+                    payment_type=final_payment_type,
+                    allocation_date=allocation_date,
+                    description=description or notes,
+                    notes=description or notes
                 )
 
+                checker_name = request.user.full_name or request.user.username
+                recipient_name = employee.full_name or employee.username
+                emp_code = employee.employee_id or employee.username
                 log_audit(
                     request.user,
                     'FUNDS_ALLOCATED',
                     'USER',
                     employee.id,
-                    f"Checker {request.user.full_name} allocated ₹{allocate_amount:,} to Maker {employee.full_name} ({employee.employee_id}). Deducted ₹{allocate_amount:,} from Checker. New Maker limit: ₹{employee.allocated_funds:,}. Checker remaining limit: ₹{checker.allocated_funds:,}. Notes: {notes or 'None'}",
+                    f"Funds allocated to Maker {recipient_name} ({emp_code}), ₹{allocate_amount:,} ({allocate_amount:,} rupees) by Checker {checker_name}. Mode: {final_payment_type}, Voucher: {voucher_number or 'N/A'}, Date: {allocation_date}. Deducted ₹{allocate_amount:,} from Checker available balance. New Maker limit: ₹{employee.allocated_funds:,}, Checker remaining limit: ₹{checker.allocated_funds:,}. Notes: {description or notes or 'None'}",
                     request
                 )
 
@@ -877,6 +945,11 @@ class AdminAllocateFundsView(APIView):
 
             else:
                 # ADMIN
+                if not voucher_number:
+                    return Response({'detail': 'Voucher number is required.'}, status=status.HTTP_400_BAD_REQUEST)
+                if not description:
+                    return Response({'detail': 'Description is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
                 try:
                     if raw_amount is not None:
                         allocate_amount = int(raw_amount)
@@ -909,15 +982,23 @@ class AdminAllocateFundsView(APIView):
                     recipient_role=employee.role,
                     recipient_previous_balance=old_funds,
                     recipient_new_balance=employee.allocated_funds,
-                    notes=notes
+                    voucher_number=voucher_number,
+                    payment_type=final_payment_type,
+                    allocation_date=allocation_date,
+                    description=description,
+                    notes=description
                 )
 
+                admin_name = request.user.full_name or request.user.username
+                recipient_role = employee.role.title()
+                recipient_name = employee.full_name or employee.username
+                emp_code = employee.employee_id or employee.username
                 log_audit(
                     request.user,
                     'FUNDS_ALLOCATED',
                     'USER',
                     employee.id,
-                    f"Admin {request.user.full_name} allocated ₹{allocate_amount:,} to {employee.full_name} ({employee.employee_id}). Previous: ₹{old_funds:,}, New total: ₹{employee.allocated_funds:,}. Notes: {notes or 'None'}",
+                    f"Funds allocated to {recipient_role} {recipient_name} ({emp_code}), ₹{allocate_amount:,} ({allocate_amount:,} rupees) by Admin {admin_name}. Voucher #{voucher_number}, Mode: {final_payment_type}, Date: {allocation_date}. Previous limit: ₹{old_funds:,}, new limit: ₹{employee.allocated_funds:,}. Description: {description}",
                     request
                 )
 

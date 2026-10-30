@@ -173,9 +173,63 @@ class AdminResetPasswordSerializer(serializers.Serializer):
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
+    allocated_funds = serializers.SerializerMethodField()
+    funds_used = serializers.SerializerMethodField()
+    funds_remaining = serializers.SerializerMethodField()
+    employees_count = serializers.SerializerMethodField()
+    makers_count = serializers.SerializerMethodField()
+    checkers_count = serializers.SerializerMethodField()
+
     class Meta:
         model = Department
-        fields = ['id', 'name', 'code', 'description', 'is_active', 'created_at', 'updated_at']
+        fields = [
+            'id', 'name', 'name_lower', 'code', 'description', 'is_active',
+            'created_at', 'updated_at',
+            'allocated_funds', 'funds_used', 'funds_remaining',
+            'employees_count', 'makers_count', 'checkers_count'
+        ]
+
+    def validate_name(self, value):
+        name = value.strip().lower()
+        if not name:
+            raise serializers.ValidationError('Department name is required.')
+        qs = Department.objects.filter(name_lower=name)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('A department with this name already exists.')
+        return name
+
+    def get_employees_count(self, obj):
+        from accounts.models import User
+        return User.objects.filter(department__iexact=obj.name, is_active=True).count()
+
+    def get_makers_count(self, obj):
+        from accounts.models import User
+        return User.objects.filter(department__iexact=obj.name, role='MAKER', is_active=True).count()
+
+    def get_checkers_count(self, obj):
+        from accounts.models import User
+        return User.objects.filter(department__iexact=obj.name, role='CHECKER', is_active=True).count()
+
+    def get_allocated_funds(self, obj):
+        from accounts.models import User
+        from django.db.models import Sum
+        total = User.objects.filter(department__iexact=obj.name, is_active=True).aggregate(t=Sum('allocated_funds'))['t']
+        return total or 0
+
+    def get_funds_used(self, obj):
+        from expenses.models import Expense
+        from django.db.models import Sum
+        total = Expense.objects.filter(
+            maker__department__iexact=obj.name
+        ).exclude(
+            status__in=['REJECTED_BY_CHECKER', 'REJECTED_BY_ADMIN', 'CANCELLED']
+        ).aggregate(t=Sum('amount'))['t']
+        return total or 0
+
+    def get_funds_remaining(self, obj):
+        return self.get_allocated_funds(obj) - self.get_funds_used(obj)
 
 
 class ForgotPasswordSerializer(serializers.Serializer):

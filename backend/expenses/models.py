@@ -12,6 +12,57 @@ class ExpenseCategory(models.Model):
         db_table = 'expense_categories'
         ordering = ['name']
         verbose_name_plural = 'Expense Categories'
+        constraints = [
+            models.UniqueConstraint(
+                models.functions.Lower('name'),
+                name='unique_expense_category_name_lower'
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.name:
+            self.name = self.name.strip()
+
+    def save(self, *args, **kwargs):
+        if self.name:
+            self.name = self.name.strip()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+
+class SavedVendor(models.Model):
+    name = models.CharField(max_length=150, unique=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='saved_vendors'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'saved_vendors'
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                models.functions.Lower('name'),
+                name='unique_saved_vendor_name_lower'
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.name:
+            self.name = self.name.strip()
+
+    def save(self, *args, **kwargs):
+        if self.name:
+            self.name = self.name.strip()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name
@@ -368,6 +419,10 @@ class FundAllocation(models.Model):
     allocator_previous_balance = models.BigIntegerField(null=True, blank=True)
     allocator_new_balance = models.BigIntegerField(null=True, blank=True)
     notes = models.TextField(blank=True, default='')
+    voucher_number = models.CharField(max_length=100, blank=True, default='')
+    payment_type = models.CharField(max_length=100, blank=True, default='Cash')
+    allocation_date = models.DateField(null=True, blank=True)
+    description = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -379,6 +434,12 @@ class FundAllocation(models.Model):
 
     def save(self, *args, **kwargs):
         is_new = self.pk is None
+        if self.description and not self.notes:
+            self.notes = self.description
+        elif self.notes and not self.description:
+            self.description = self.notes
+        if not self.allocation_date:
+            self.allocation_date = timezone.localdate()
         super().save(*args, **kwargs)
         if is_new and not self.allocation_number:
             self.allocation_number = f"ALC-{10000 + self.pk}"

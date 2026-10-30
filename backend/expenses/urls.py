@@ -1,6 +1,11 @@
 from django.urls import path
 from .views import (
     ExpenseCategoryListView,
+    ExpenseCategoryDetailView,
+    SavedVendorListView,
+    AdminVendorSummaryListView,
+    AdminVendorDetailView,
+    AdminVendorDeleteView,
     SharedFundAccountListView,
     SharedFundAccountDetailView,
     DisbursementVoucherListView,
@@ -16,6 +21,7 @@ from .views import (
     DashboardSummaryView,
     AuditLogListView,
     FundAllocationListView,
+    NotificationListView,
 )
 
 urlpatterns = [
@@ -24,9 +30,18 @@ urlpatterns = [
 
     # Expense categories
     path('categories/', ExpenseCategoryListView.as_view(), name='category-list'),
+    path('categories/<int:pk>/', ExpenseCategoryDetailView.as_view(), name='category-detail'),
+
+    # Saved Vendors
+    path('vendors/', SavedVendorListView.as_view(), name='saved-vendor-list'),
+    path('vendors/summary/', AdminVendorSummaryListView.as_view(), name='admin-vendor-summary-list'),
+    path('vendors/detail/', AdminVendorDetailView.as_view(), name='admin-vendor-detail'),
+    path('vendors/<int:pk>/', AdminVendorDeleteView.as_view(), name='admin-vendor-delete'),
+    path('expenses/vendors/', SavedVendorListView.as_view(), name='expenses-vendor-alias'),
 
     # Fund Allocations History
     path('allocations/', FundAllocationListView.as_view(), name='allocation-list'),
+    path('expenses/allocations/', FundAllocationListView.as_view(), name='expenses-allocation-alias'),
 
     # Shared Fund Accounts
     path('accounts/', SharedFundAccountListView.as_view(), name='fund-account-list'),
@@ -52,4 +67,7 @@ urlpatterns = [
 
     # Audit Logs
     path('audit-logs/', AuditLogListView.as_view(), name='audit-logs'),
+
+    # Notifications
+    path('notifications/', NotificationListView.as_view(), name='notifications-list'),
 ]

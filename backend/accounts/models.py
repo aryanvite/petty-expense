@@ -122,6 +122,7 @@ class OtpRequest(models.Model):
 
 class Department(models.Model):
     name = models.CharField(max_length=100, unique=True)
+    name_lower = models.CharField(max_length=100, unique=True, default='')
     code = models.CharField(max_length=20, unique=True, blank=True)
     description = models.TextField(blank=True, default='')
     is_active = models.BooleanField(default=True)
@@ -131,11 +132,26 @@ class Department(models.Model):
     class Meta:
         db_table = 'departments'
         ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['name_lower'],
+                name='unique_department_name_lower'
+            )
+        ]
 
     def __str__(self):
         return self.name
 
+    def clean(self):
+        super().clean()
+        if self.name:
+            self.name = self.name.strip().lower()
+            self.name_lower = self.name.strip().lower()
+
     def save(self, *args, **kwargs):
+        if self.name:
+            self.name = self.name.strip().lower()
+            self.name_lower = self.name.strip().lower()
         if not self.code:
             import re
             clean_name = re.sub(r'[^A-Za-z0-9]', '', self.name)

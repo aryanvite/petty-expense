@@ -10,6 +10,7 @@ import MakerDashboard from './pages/MakerDashboard';
 import CheckerDashboard from './pages/CheckerDashboard';
 import EmployeeDetail from './pages/EmployeeDetail';
 import Profile from './pages/Profile';
+import { LoadingScreen } from './components/GoogleSpinner';
 
 // Route Guard: requires authenticated user with specific role
 function ProtectedRoleRoute({ allowedRoles, children }) {
@@ -17,9 +18,11 @@ function ProtectedRoleRoute({ allowedRoles, children }) {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#f8fafc' }}>
-        <div style={{ fontWeight: 600, color: '#64748b' }}>Loading Petty Expense System...</div>
-      </div>
+      <LoadingScreen
+        fullPage
+        message="Authenticating session"
+        subtext="Securing connection to Petty Expense workspace..."
+      />
     );
   }
 
@@ -45,9 +48,11 @@ function RootRedirect() {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-        Loading...
-      </div>
+      <LoadingScreen
+        fullPage
+        message="Loading Petty Expense"
+        subtext="Verifying credentials and access permissions..."
+      />
     );
   }
 

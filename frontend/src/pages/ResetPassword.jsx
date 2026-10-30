@@ -1,3 +1,4 @@
+import { LoadingScreen } from '../components/GoogleSpinner';
 import React, { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import api from '../api';
@@ -138,6 +139,7 @@ export default function ResetPassword() {
       background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)',
       padding: '24px'
     }}>
+      {loading && <LoadingScreen fullPage />}
       <div style={{
         width: '100%',
         maxWidth: '460px',

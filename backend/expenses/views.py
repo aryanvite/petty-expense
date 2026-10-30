@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from django.db import models, transaction
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, Min, Max
 from django.utils import timezone
 from datetime import datetime
 from django.contrib.auth import get_user_model
@@ -10,6 +10,7 @@ User = get_user_model()
 
 from .models import (
     ExpenseCategory,
+    SavedVendor,
     SharedFundAccount,
     DisbursementVoucher,
     AdditionalFundRequest,
@@ -20,6 +21,7 @@ from .models import (
 )
 from .serializers import (
     ExpenseCategorySerializer,
+    SavedVendorSerializer,
     SharedFundAccountSerializer,
     SharedFundAccountCreateSerializer,
     DisbursementVoucherSerializer,
@@ -36,7 +38,8 @@ from .serializers import (
 from accounts.permissions import (
     IsAdminUserRole,
     IsMakerUserRole,
-    IsCheckerUserRole
+    IsCheckerUserRole,
+    IsAdminOrCheckerUserRole
 )
 from accounts.views import log_audit
 
@@ -47,19 +50,312 @@ from accounts.views import log_audit
 
 class ExpenseCategoryListView(APIView):
     def get(self, request):
-        categories = ExpenseCategory.objects.filter(is_active=True)
+        include_stats = request.query_params.get('include_stats') == 'true' or request.user.role == 'ADMIN'
+        include_inactive = request.query_params.get('include_inactive') == 'true'
+        
+        if include_inactive and request.user.role == 'ADMIN':
+            categories = ExpenseCategory.objects.all()
+        else:
+            categories = ExpenseCategory.objects.filter(is_active=True)
+
+        if include_stats:
+            data = []
+            for cat in categories:
+                exp_qs = Expense.objects.filter(category=cat.name)
+                total_amt = exp_qs.exclude(status__in=['REJECTED_BY_CHECKER', 'REJECTED_BY_ADMIN']).aggregate(total=Sum('amount'))['total'] or 0
+                cnt = exp_qs.count()
+                data.append({
+                    'id': cat.id,
+                    'name': cat.name,
+                    'description': cat.description,
+                    'is_active': cat.is_active,
+                    'created_at': cat.created_at,
+                    'total_amount': total_amt,
+                    'expense_count': cnt,
+                })
+            grand_total = sum(d['total_amount'] for d in data) or 0
+            for d in data:
+                d['percentage'] = round((d['total_amount'] / grand_total * 100), 1) if grand_total > 0 else 0.0
+            return Response(data)
+
         serializer = ExpenseCategorySerializer(categories, many=True)
         return Response(serializer.data)
 
     def post(self, request):
         if request.user.role != 'ADMIN':
             return Response({'detail': 'Only administrators can create categories.'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = ExpenseCategorySerializer(data=request.data)
+        name = request.data.get('name', '').strip()
+        if not name:
+            return Response({'name': ['Category name is required.']}, status=status.HTTP_400_BAD_REQUEST)
+        existing = ExpenseCategory.objects.filter(name__iexact=name).first()
+        if existing:
+            if not existing.is_active:
+                existing.is_active = True
+                existing.description = request.data.get('description', existing.description)
+                existing.save()
+                log_audit(request.user, 'CATEGORY_REACTIVATED', 'CATEGORY', existing.id, f"Reactivated category {existing.name}", request)
+                return Response(ExpenseCategorySerializer(existing).data, status=status.HTTP_200_OK)
+            return Response({'name': ['A category with this name already exists.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = ExpenseCategorySerializer(data={'name': name, 'description': request.data.get('description', '').strip()})
         if serializer.is_valid():
             cat = serializer.save()
             log_audit(request.user, 'CATEGORY_CREATED', 'CATEGORY', cat.id, f"Created category {cat.name}", request)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ExpenseCategoryDetailView(APIView):
+    def delete(self, request, pk):
+        if request.user.role != 'ADMIN':
+            return Response({'detail': 'Only administrators can delete categories.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            cat = ExpenseCategory.objects.get(pk=pk)
+        except ExpenseCategory.DoesNotExist:
+            return Response({'detail': 'Category not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        cat_name = cat.name
+        expenses_count = Expense.objects.filter(category=cat_name).count()
+        if expenses_count > 0:
+            cat.is_active = False
+            cat.save()
+            log_audit(request.user, 'CATEGORY_DEACTIVATED', 'CATEGORY', cat.id, f"Deactivated category {cat_name} ({expenses_count} existing expenses)", request)
+            return Response({
+                'detail': f'Category "{cat_name}" was deactivated because it is linked to {expenses_count} historical expense claim(s).',
+                'action': 'deactivated',
+                'id': pk
+            })
+        else:
+            cat.delete()
+            log_audit(request.user, 'CATEGORY_DELETED', 'CATEGORY', pk, f"Deleted unused category {cat_name}", request)
+            return Response({
+                'detail': f'Category "{cat_name}" was deleted successfully.',
+                'action': 'deleted',
+                'id': pk
+            })
+
+    def patch(self, request, pk):
+        if request.user.role != 'ADMIN':
+            return Response({'detail': 'Only administrators can edit categories.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            cat = ExpenseCategory.objects.get(pk=pk)
+        except ExpenseCategory.DoesNotExist:
+            return Response({'detail': 'Category not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if 'name' in request.data:
+            new_name = request.data.get('name', '').strip()
+            if not new_name:
+                return Response({'name': ['Category name cannot be blank.']}, status=status.HTTP_400_BAD_REQUEST)
+            if ExpenseCategory.objects.filter(name__iexact=new_name).exclude(pk=pk).exists():
+                return Response({'name': ['A category with this name already exists.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = ExpenseCategorySerializer(cat, data=request.data, partial=True)
+        if serializer.is_valid():
+            cat = serializer.save()
+            log_audit(request.user, 'CATEGORY_UPDATED', 'CATEGORY', cat.id, f"Updated category {cat.name}", request)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SavedVendorListView(APIView):
+    def get(self, request):
+        saved_names = list(SavedVendor.objects.values_list('name', flat=True))
+        expense_names = list(Expense.objects.exclude(payee='').values_list('payee', flat=True).distinct())
+        all_unique = sorted(list(set(saved_names + expense_names)), key=lambda s: s.lower())
+        items = [{'name': name, 'is_saved': name in saved_names} for name in all_unique if name.strip()]
+        return Response(items)
+
+    def post(self, request):
+        name = request.data.get('name', '').strip()
+        if not name:
+            return Response({'detail': 'Vendor name is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        existing = SavedVendor.objects.filter(name__iexact=name).first()
+        if existing:
+            return Response({'detail': f'Vendor "{existing.name}" already exists.'}, status=status.HTTP_400_BAD_REQUEST)
+        vendor = SavedVendor.objects.create(
+            name=name,
+            created_by=request.user
+        )
+        return Response({'id': vendor.id, 'name': vendor.name, 'created': True}, status=status.HTTP_201_CREATED)
+
+
+class AdminVendorSummaryListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ['ADMIN', 'CHECKER']:
+            return Response({'detail': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        search_query = request.query_params.get('search', '').strip().lower()
+        saved_qs = SavedVendor.objects.all().order_by('name')
+        saved_dict = {v.name.strip().lower(): v for v in saved_qs}
+
+        expense_payees = Expense.objects.exclude(payee='').values_list('payee', flat=True).distinct()
+        all_norm_names = sorted(list(set(list(saved_dict.keys()) + [p.strip().lower() for p in expense_payees if p.strip()])))
+
+        results = []
+        for norm_name in all_norm_names:
+            matching_expenses = Expense.objects.filter(payee__iexact=norm_name)
+            saved_obj = saved_dict.get(norm_name)
+
+            first_exp = matching_expenses.first()
+            if saved_obj:
+                display_name = saved_obj.name
+            elif first_exp:
+                display_name = first_exp.payee
+            else:
+                display_name = norm_name.title()
+
+            if search_query and search_query not in display_name.lower():
+                continue
+
+            approved_expenses = matching_expenses.filter(status__in=['ACCEPTED_BY_CHECKER', 'ACCEPTED_BY_ADMIN'])
+            pending_expenses = matching_expenses.filter(status__in=['SUBMITTED', 'SENT_TO_ADMIN'])
+            rejected_expenses = matching_expenses.filter(status__in=['REJECTED_BY_CHECKER', 'REJECTED_BY_ADMIN'])
+
+            total_spent = approved_expenses.aggregate(t=Sum('amount'))['t'] or 0
+            pending_amount = pending_expenses.aggregate(t=Sum('amount'))['t'] or 0
+            total_claims = matching_expenses.count()
+            unique_employees = matching_expenses.values('maker').distinct().count()
+
+            cats = list(matching_expenses.exclude(category='').values_list('category', flat=True).distinct()[:5])
+            date_agg = matching_expenses.aggregate(first=Min('expense_date'), last=Max('expense_date'))
+
+            results.append({
+                'id': saved_obj.id if saved_obj else None,
+                'name': display_name,
+                'is_saved': saved_obj is not None,
+                'total_spent': total_spent,
+                'pending_amount': pending_amount,
+                'total_claims_count': total_claims,
+                'approved_claims_count': approved_expenses.count(),
+                'pending_claims_count': pending_expenses.count(),
+                'rejected_claims_count': rejected_expenses.count(),
+                'unique_employees_count': unique_employees,
+                'categories': cats,
+                'first_expense_date': date_agg['first'],
+                'last_expense_date': date_agg['last'],
+                'created_at': saved_obj.created_at if saved_obj else date_agg['first']
+            })
+
+        sort_by = request.query_params.get('sort_by', 'spend_desc')
+        if sort_by == 'spend_desc':
+            results.sort(key=lambda x: x['total_spent'], reverse=True)
+        elif sort_by == 'spend_asc':
+            results.sort(key=lambda x: x['total_spent'])
+        elif sort_by == 'name_asc':
+            results.sort(key=lambda x: x['name'].lower())
+        elif sort_by == 'name_desc':
+            results.sort(key=lambda x: x['name'].lower(), reverse=True)
+        elif sort_by == 'claims_desc':
+            results.sort(key=lambda x: x['total_claims_count'], reverse=True)
+        else:
+            results.sort(key=lambda x: x['total_spent'], reverse=True)
+
+        return Response(results)
+
+
+class AdminVendorDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role not in ['ADMIN', 'CHECKER']:
+            return Response({'detail': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        name = request.query_params.get('name', '').strip()
+        if not name:
+            return Response({'detail': 'Vendor name parameter is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        saved_obj = SavedVendor.objects.filter(name__iexact=name).first()
+        matching_expenses = Expense.objects.filter(payee__iexact=name).select_related('maker', 'checker', 'admin').order_by('-expense_date', '-created_at')
+
+        approved_expenses = matching_expenses.filter(status__in=['ACCEPTED_BY_CHECKER', 'ACCEPTED_BY_ADMIN'])
+        pending_expenses = matching_expenses.filter(status__in=['SUBMITTED', 'SENT_TO_ADMIN'])
+        rejected_expenses = matching_expenses.filter(status__in=['REJECTED_BY_CHECKER', 'REJECTED_BY_ADMIN'])
+
+        total_spent = approved_expenses.aggregate(t=Sum('amount'))['t'] or 0
+        pending_amount = pending_expenses.aggregate(t=Sum('amount'))['t'] or 0
+        total_claims = matching_expenses.count()
+
+        employees_dict = {}
+        for exp in matching_expenses:
+            m = exp.maker
+            if not m:
+                continue
+            if m.id not in employees_dict:
+                employees_dict[m.id] = {
+                    'id': m.id,
+                    'employee_id': m.employee_id or f"EMP{m.id:04d}",
+                    'full_name': m.full_name or m.email,
+                    'email': m.email,
+                    'role': m.role,
+                    'department': m.department or 'General',
+                    'designation': m.designation or '',
+                    'claims_count': 0,
+                    'approved_claims_count': 0,
+                    'total_spent': 0,
+                    'pending_amount': 0,
+                    'last_expense_date': None,
+                }
+            emp_data = employees_dict[m.id]
+            emp_data['claims_count'] += 1
+            if exp.status in ['ACCEPTED_BY_CHECKER', 'ACCEPTED_BY_ADMIN']:
+                emp_data['approved_claims_count'] += 1
+                emp_data['total_spent'] += exp.amount
+            elif exp.status in ['SUBMITTED', 'SENT_TO_ADMIN']:
+                emp_data['pending_amount'] += exp.amount
+
+            if not emp_data['last_expense_date'] or exp.expense_date > emp_data['last_expense_date']:
+                emp_data['last_expense_date'] = exp.expense_date
+
+        employees_list = sorted(list(employees_dict.values()), key=lambda e: e['total_spent'], reverse=True)
+        expenses_data = ExpenseSerializer(matching_expenses, many=True, context={'request': request}).data
+
+        summary = {
+            'id': saved_obj.id if saved_obj else None,
+            'name': saved_obj.name if saved_obj else name,
+            'is_saved': saved_obj is not None,
+            'total_spent': total_spent,
+            'pending_amount': pending_amount,
+            'total_claims_count': total_claims,
+            'approved_claims_count': approved_expenses.count(),
+            'pending_claims_count': pending_expenses.count(),
+            'rejected_claims_count': rejected_expenses.count(),
+            'unique_employees_count': len(employees_list),
+            'first_expense_date': matching_expenses.last().expense_date if matching_expenses.exists() else None,
+            'last_expense_date': matching_expenses.first().expense_date if matching_expenses.exists() else None,
+        }
+
+        return Response({
+            'summary': summary,
+            'employees': employees_list,
+            'expenses': expenses_data
+        })
+
+
+class AdminVendorDeleteView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, pk):
+        if request.user.role != 'ADMIN':
+            return Response({'detail': 'Only Admins can delete saved vendors.'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            vendor = SavedVendor.objects.get(pk=pk)
+        except SavedVendor.DoesNotExist:
+            return Response({'detail': 'Vendor not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        vendor_name = vendor.name
+        vendor.delete()
+        log_audit(
+            request.user,
+            'VENDOR_DELETED',
+            'VENDOR',
+            pk,
+            f"Deleted saved vendor {vendor_name}",
+            request
+        )
+        return Response({'detail': f'Vendor "{vendor_name}" deleted successfully.'}, status=status.HTTP_200_OK)
 
 
 # ==========================================================
@@ -369,13 +665,15 @@ class AdditionalFundRequestListView(APIView):
             status=initial_status
         )
 
-        role_name = request.user.role.capitalize()
+        role_name = request.user.role.title()
+        user_name = request.user.full_name or request.user.username
+        emp_code = request.user.employee_id or request.user.username
         log_audit(
             request.user,
             'FUND_REQUEST_SUBMITTED',
             'FUND_REQUEST',
             req.request_number,
-            f"{role_name} {request.user.full_name} submitted fund request for ₹{req.requested_amount:,}. Reason: {req.reason}",
+            f"Fund request #{req.request_number} for ₹{req.requested_amount:,} ({req.requested_amount:,} rupees) submitted by {role_name} {user_name} ({emp_code}). Reason: {req.reason or 'None'}",
             request
         )
 
@@ -386,7 +684,7 @@ class AdditionalFundRequestReviewView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
-        if request.user.role not in ['ADMIN', 'CHECKER']:
+        if request.user.role not in ['ADMIN', 'SUPER_ADMIN', 'CHECKER']:
             return Response({'detail': 'Only Admins and Checkers can review fund requests.'}, status=status.HTTP_403_FORBIDDEN)
 
         try:
@@ -411,12 +709,16 @@ class AdditionalFundRequestReviewView(APIView):
                 fund_req.checker_action_at = timezone.now()
                 fund_req.save()
 
+                checker_name = request.user.full_name or request.user.username
+                maker_role = fund_req.maker.role.title()
+                maker_name = fund_req.maker.full_name or fund_req.maker.username
+                maker_code = fund_req.maker.employee_id or fund_req.maker.username
                 log_audit(
                     request.user,
                     'FUND_REQUEST_SENT_TO_ADMIN',
                     'FUND_REQUEST',
                     fund_req.request_number,
-                    f"Checker {request.user.full_name} forwarded fund request #{fund_req.request_number} (₹{fund_req.requested_amount:,}) to Admin. Notes: {comments or 'None'}",
+                    f"Fund request #{fund_req.request_number} for ₹{fund_req.requested_amount:,} ({fund_req.requested_amount:,} rupees) forwarded to Admin by Checker {checker_name} for {maker_role} {maker_name} ({maker_code}). Notes: {comments or 'None'}",
                     request
                 )
                 return Response(AdditionalFundRequestSerializer(fund_req).data, status=status.HTTP_200_OK)
@@ -504,25 +806,42 @@ class AdditionalFundRequestReviewView(APIView):
                     notes=f"Approved fund request #{fund_req.request_number}: {comments or 'Replenishment'}"
                 )
 
+                allocator_role = request.user.role.title()
+                allocator_name = request.user.full_name or request.user.username
+                recipient_role = requester.role.title()
+                recipient_name = requester.full_name or requester.username
+                emp_code = requester.employee_id or requester.username
                 log_audit(
                     request.user,
                     'FUNDS_ALLOCATED',
                     'USER',
                     requester.id,
-                    f"{request.user.role.title()} {request.user.full_name} approved fund request #{fund_req.request_number} (?{fund_req.approved_amount:,}) for {requester.full_name} ({requester.role}). Company fund balance reduced by ?{fund_req.approved_amount:,}. Requester previous limit: ?{old_funds:,}, new limit: ?{requester.allocated_funds:,}.",
+                    f"Funds allocated to {recipient_role} {recipient_name} ({emp_code}), ₹{fund_req.approved_amount:,} ({fund_req.approved_amount:,} rupees) by {allocator_role} {allocator_name} via approved fund request #{fund_req.request_number}. Previous limit: ₹{old_funds:,}, new limit: ₹{requester.allocated_funds:,}.",
                     request
                 )
 
-            # Supplementary voucher generation for backward-compatibility if fund_account is linked
-            should_create_voucher = request.data.get('create_voucher') or request.data.get('auto_disburse')
-            if action in ['APPROVE', 'PARTIALLY_APPROVE'] and should_create_voucher and fund_req.fund_account:
+            # Supplementary voucher generation: default to True when approving
+            should_create_voucher = request.data.get('create_voucher')
+            if should_create_voucher is None:
+                should_create_voucher = request.data.get('auto_disburse')
+            if should_create_voucher is None:
+                should_create_voucher = True
+
+            target_account = fund_req.fund_account
+            if not target_account and request.user.role in ['ADMIN', 'SUPER_ADMIN']:
+                target_account = SharedFundAccount.objects.filter(is_active=True).first() or SharedFundAccount.objects.first()
+                if target_account:
+                    fund_req.fund_account = target_account
+                    fund_req.save(update_fields=['fund_account'])
+
+            if action in ['APPROVE', 'PARTIALLY_APPROVE'] and should_create_voucher and target_account:
                 voucher_amount = fund_req.approved_amount
                 beneficiary = request.data.get('beneficiary', fund_req.maker.full_name)
                 payment_mode = request.data.get('payment_mode', 'BANK_TRANSFER')
                 payment_reference = request.data.get('payment_reference', '')
 
                 DisbursementVoucher.objects.create(
-                    fund_account=fund_req.fund_account,
+                    fund_account=target_account,
                     voucher_type='SUPPLEMENTARY',
                     beneficiary=beneficiary,
                     amount=voucher_amount,
@@ -539,12 +858,27 @@ class AdditionalFundRequestReviewView(APIView):
                 fund_req.status = 'DISBURSED'
                 fund_req.save(update_fields=['status'])
 
+            reviewer_role = request.user.role.title()
+            reviewer_name = request.user.full_name or request.user.username
+            maker_role = fund_req.maker.role.title()
+            maker_name = fund_req.maker.full_name or fund_req.maker.username
+            maker_code = fund_req.maker.employee_id or fund_req.maker.username
+
+            if action == 'APPROVE':
+                review_details = f"Fund request #{fund_req.request_number} for ₹{fund_req.requested_amount:,} ({fund_req.requested_amount:,} rupees) reviewed and APPROVED by {reviewer_role} {reviewer_name} for {maker_role} {maker_name} ({maker_code}). Approved amount: ₹{fund_req.approved_amount:,} ({fund_req.approved_amount:,} rupees). Comments: {comments or 'None'}"
+            elif action == 'PARTIALLY_APPROVE':
+                review_details = f"Fund request #{fund_req.request_number} for ₹{fund_req.requested_amount:,} ({fund_req.requested_amount:,} rupees) reviewed and PARTIALLY APPROVED by {reviewer_role} {reviewer_name} for {maker_role} {maker_name} ({maker_code}). Approved amount: ₹{fund_req.approved_amount:,} ({fund_req.approved_amount:,} rupees). Comments: {comments or 'None'}"
+            elif action == 'REJECT':
+                review_details = f"Fund request #{fund_req.request_number} for ₹{fund_req.requested_amount:,} ({fund_req.requested_amount:,} rupees) reviewed and REJECTED by {reviewer_role} {reviewer_name} for {maker_role} {maker_name} ({maker_code}). Comments: {comments or 'None'}"
+            else:
+                review_details = f"Fund request #{fund_req.request_number} for ₹{fund_req.requested_amount:,} ({fund_req.requested_amount:,} rupees) reviewed ({action}) by {reviewer_role} {reviewer_name} for {maker_role} {maker_name} ({maker_code}). Comments: {comments or 'None'}"
+
             log_audit(
                 request.user,
                 'FUND_REQUEST_REVIEWED',
                 'FUND_REQUEST',
                 fund_req.request_number,
-                f"Action {action} for {fund_req.request_number} (₹{fund_req.approved_amount or 0:,})",
+                review_details,
                 request
             )
 
@@ -572,12 +906,14 @@ class AdditionalFundRequestCancelView(APIView):
         fund_req.status = 'CANCELLED'
         fund_req.save(update_fields=['status', 'updated_at'])
 
+        canceller_role = request.user.role.title()
+        canceller_name = request.user.full_name or request.user.username
         log_audit(
             request.user,
             'FUND_REQUEST_CANCELLED',
             'FUND_REQUEST',
             fund_req.request_number,
-            f"Cancelled fund request {fund_req.request_number} (₹{fund_req.requested_amount:,})",
+            f"Fund request #{fund_req.request_number} for ₹{fund_req.requested_amount:,} ({fund_req.requested_amount:,} rupees) cancelled by {canceller_role} {canceller_name}.",
             request
         )
 
@@ -597,7 +933,7 @@ class ExpenseListView(APIView):
             queryset = queryset.filter(maker=user)
         elif user.role == 'CHECKER':
             scope = request.query_params.get('scope', '').lower()
-            if scope == 'my_claims':
+            if scope in ['my_claims', 'my_expenses', 'my-expenses', 'my']:
                 queryset = queryset.filter(maker=user)
             else:
                 queryset = queryset.filter(maker__role='MAKER')
@@ -607,6 +943,13 @@ class ExpenseListView(APIView):
         status_param = request.query_params.get('status', '').upper()
         if status_param:
             queryset = queryset.filter(status=status_param)
+
+        maker_param = request.query_params.get('maker', '').strip()
+        if maker_param and maker_param.upper() != 'ALL':
+            if maker_param.isdigit():
+                queryset = queryset.filter(maker__id=int(maker_param))
+            else:
+                queryset = queryset.filter(Q(maker__username=maker_param) | Q(maker__full_name__icontains=maker_param))
 
         serializer = ExpenseSerializer(queryset, many=True, context={'request': request})
         return Response(serializer.data)
@@ -618,6 +961,8 @@ class ExpenseListView(APIView):
         serializer = ExpenseCreateSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        save_vendor_flag = serializer.validated_data.pop('save_vendor', False) or (str(request.data.get('save_vendor', '')).lower() in ['true', '1'])
 
         with transaction.atomic():
             fund_account = serializer.validated_data.get('fund_account')
@@ -647,6 +992,14 @@ class ExpenseListView(APIView):
                 checker_action=checker_act,
                 posted_at=posted_dt
             )
+
+            if save_vendor_flag and expense.payee:
+                vname = expense.payee.strip()
+                if vname and not SavedVendor.objects.filter(name__iexact=vname).exists():
+                    SavedVendor.objects.create(
+                        name=vname,
+                        created_by=request.user
+                    )
 
             action_desc = f'Checker {request.user.full_name} submitted claim forwarded to Admin' if is_checker else 'Submitted Maker claim'
             log_audit(
@@ -1078,7 +1431,7 @@ class AuditLogListView(APIView):
     permission_classes = [IsAdminUserRole]
 
     def get(self, request):
-        logs = AuditLog.objects.select_related('user').all()[:100]
+        logs = AuditLog.objects.select_related('user').all()[:500]
         return Response(AuditLogSerializer(logs, many=True).data)
 
 
@@ -1090,13 +1443,15 @@ class FundAllocationListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in ['ADMIN', 'CHECKER']:
+        if request.user.role not in ['ADMIN', 'CHECKER', 'MAKER']:
             return Response({'detail': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
 
         queryset = FundAllocation.objects.select_related('allocated_by', 'allocated_to').all()
 
         if request.user.role == 'CHECKER':
             queryset = queryset.filter(Q(allocated_by=request.user) | Q(allocated_to=request.user))
+        elif request.user.role == 'MAKER':
+            queryset = queryset.filter(allocated_to=request.user)
 
         allocator_role = request.query_params.get('allocator_role', '').upper()
         if allocator_role:
@@ -1109,3 +1464,180 @@ class FundAllocationListView(APIView):
         serializer = FundAllocationSerializer(queryset, many=True)
         return Response(serializer.data)
 
+
+# ==========================================================
+# UNIFIED NOTIFICATIONS
+# ==========================================================
+
+class NotificationListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        notifications = []
+
+        if user.role == 'MAKER':
+            # 1. Maker's expenses reviewed
+            exps = Expense.objects.filter(maker=user).exclude(status='SUBMITTED').order_by('-updated_at')[:30]
+            for exp in exps:
+                if exp.admin_decision == 'ACCEPT':
+                    notifications.append({
+                        'id': f'exp_adm_acc_{exp.id}',
+                        'title': f'Claim {exp.reference_number} Approved',
+                        'message': f'Admin approved your claim of ₹{exp.amount:,} for {exp.payee}.',
+                        'date': exp.admin_timestamp or exp.updated_at,
+                        'type': 'success',
+                        'link': '/maker?tab=expenses'
+                    })
+                elif exp.admin_decision == 'REJECT':
+                    notifications.append({
+                        'id': f'exp_adm_rej_{exp.id}',
+                        'title': f'Claim {exp.reference_number} Rejected',
+                        'message': f'Admin rejected your claim. Reason: "{exp.admin_comments or "No comments provided"}"',
+                        'date': exp.admin_timestamp or exp.updated_at,
+                        'type': 'danger',
+                        'link': '/maker?tab=expenses'
+                    })
+                elif exp.checker_action == 'ACCEPT':
+                    notifications.append({
+                        'id': f'exp_chk_acc_{exp.id}',
+                        'title': f'Claim {exp.reference_number} Verified by Checker',
+                        'message': f'Checker verified claim of ₹{exp.amount:,}. Sent to Admin for approval.',
+                        'date': exp.checker_timestamp or exp.updated_at,
+                        'type': 'info',
+                        'link': '/maker?tab=expenses'
+                    })
+                elif exp.checker_action == 'SEND_TO_ADMIN':
+                    notifications.append({
+                        'id': f'exp_chk_esc_{exp.id}',
+                        'title': f'Claim {exp.reference_number} Escalated to Admin',
+                        'message': f'Checker escalated with remarks: "{exp.checker_comments or "Review required"}"',
+                        'date': exp.checker_timestamp or exp.updated_at,
+                        'type': 'warning',
+                        'link': '/maker?tab=expenses'
+                    })
+
+            # 2. Maker's fund requests
+            reqs = AdditionalFundRequest.objects.filter(requester=user).exclude(status='PENDING').order_by('-updated_at')[:20]
+            for req in reqs:
+                if req.status in ['APPROVED', 'DISBURSED']:
+                    notifications.append({
+                        'id': f'req_acc_{req.id}',
+                        'title': f'Fund Request {req.request_number} Approved',
+                        'message': f'Admin approved replenishment of ₹{(req.approved_amount or req.requested_amount):,}.',
+                        'date': req.reviewed_at or req.updated_at,
+                        'type': 'success',
+                        'link': '/maker?tab=funds'
+                    })
+                elif req.status == 'REJECTED':
+                    notifications.append({
+                        'id': f'req_rej_{req.id}',
+                        'title': f'Fund Request {req.request_number} Rejected',
+                        'message': f'Admin rejected replenishment request: "{req.review_comments or "Low justification"}"',
+                        'date': req.reviewed_at or req.updated_at,
+                        'type': 'danger',
+                        'link': '/maker?tab=funds'
+                    })
+
+        elif user.role == 'CHECKER':
+            # 1. Pending claims awaiting checker verification
+            pending_exps = Expense.objects.filter(maker__role='MAKER', status='SUBMITTED').order_by('-created_at')[:30]
+            for exp in pending_exps:
+                notifications.append({
+                    'id': f'exp_chk_pend_{exp.id}',
+                    'title': f'New Claim {exp.reference_number} Pending',
+                    'message': f'{exp.maker.full_name} submitted ₹{exp.amount:,} for {exp.payee}.',
+                    'date': exp.created_at,
+                    'type': 'warning',
+                    'link': '/checker?tab=expenses'
+                })
+            # 2. Checker own claims
+            my_exps = Expense.objects.filter(maker=user).exclude(status='SENT_TO_ADMIN').order_by('-updated_at')[:20]
+            for exp in my_exps:
+                if exp.status == 'ACCEPTED_BY_ADMIN':
+                    notifications.append({
+                        'id': f'exp_chk_adm_acc_{exp.id}',
+                        'title': f'Claim {exp.reference_number} Approved by Admin',
+                        'message': f'Admin approved your direct claim of ₹{exp.amount:,}.',
+                        'date': exp.admin_timestamp or exp.updated_at,
+                        'type': 'success',
+                        'link': '/checker?tab=my-expenses'
+                    })
+                elif exp.status == 'REJECTED_BY_ADMIN':
+                    notifications.append({
+                        'id': f'exp_chk_adm_rej_{exp.id}',
+                        'title': f'Claim {exp.reference_number} Rejected by Admin',
+                        'message': f'Admin rejected your direct claim. Reason: "{exp.admin_comments or "Rejected"}"',
+                        'date': exp.admin_timestamp or exp.updated_at,
+                        'type': 'danger',
+                        'link': '/checker?tab=my-expenses'
+                    })
+            # 3. Checker's own fund requests
+            checker_reqs = AdditionalFundRequest.objects.filter(maker=user).exclude(status='SUBMITTED').order_by('-updated_at')[:20]
+            for req in checker_reqs:
+                if req.status in ['APPROVED', 'DISBURSED']:
+                    notifications.append({
+                        'id': f'chk_req_acc_{req.id}',
+                        'title': f'Fund Request {req.request_number} Approved',
+                        'message': f'Admin approved supplementary disbursement of ₹{(req.approved_amount or req.requested_amount):,}.',
+                        'date': req.reviewed_at or req.updated_at,
+                        'type': 'success',
+                        'link': '/checker?tab=requests'
+                    })
+                elif req.status == 'REJECTED':
+                    notifications.append({
+                        'id': f'chk_req_rej_{req.id}',
+                        'title': f'Fund Request {req.request_number} Rejected',
+                        'message': f'Admin rejected replenishment request: "{req.review_comments or "Low justification"}"',
+                        'date': req.reviewed_at or req.updated_at,
+                        'type': 'danger',
+                        'link': '/checker?tab=requests'
+                    })
+
+        elif user.role == 'ADMIN':
+            # 1. Claims awaiting admin decision
+            queue_exps = Expense.objects.filter(status__in=['SUBMITTED', 'SENT_TO_ADMIN']).order_by('-created_at')[:30]
+            for exp in queue_exps:
+                notifications.append({
+                    'id': f'adm_queue_{exp.id}',
+                    'title': f'Claim {exp.reference_number} Awaiting Decision',
+                    'message': f'{exp.maker.full_name} ({exp.maker.role}) submitted ₹{exp.amount:,} for {exp.payee}.',
+                    'date': exp.created_at,
+                    'type': 'warning',
+                    'link': '/admin?tab=checker-expenses' if exp.status == 'SENT_TO_ADMIN' else '/admin?tab=expenses'
+                })
+            # 2. Pending fund requests
+            queue_reqs = AdditionalFundRequest.objects.filter(status='PENDING').order_by('-created_at')[:20]
+            for req in queue_reqs:
+                notifications.append({
+                    'id': f'adm_req_{req.id}',
+                    'title': f'Fund Request {req.request_number} Pending',
+                    'message': f'{req.requester.full_name} requested ₹{req.requested_amount:,}. Justification: "{req.justification[:60]}".',
+                    'date': req.created_at,
+                    'type': 'warning',
+                    'link': '/admin?tab=requests'
+                })
+
+        # Sort all by date descending
+        notifications.sort(key=lambda x: str(x['date']), reverse=True)
+
+        # Format relative time
+        now = timezone.now()
+        for n in notifications:
+            dt = n['date']
+            try:
+                diff = int((now - dt).total_seconds())
+            except Exception:
+                diff = 0
+            if diff < 60:
+                n['time_ago'] = 'Just now'
+            elif diff < 3600:
+                n['time_ago'] = f"{diff // 60}m ago"
+            elif diff < 86400:
+                n['time_ago'] = f"{diff // 3600}h ago"
+            elif diff < 2592000:
+                n['time_ago'] = f"{diff // 86400}d ago"
+            else:
+                n['time_ago'] = f"{diff // 2592000}mo ago"
+
+        return Response(notifications[:40])

@@ -1,6 +1,8 @@
 from rest_framework import serializers
+from django.utils import timezone
 from .models import (
     ExpenseCategory,
+    SavedVendor,
     SharedFundAccount,
     DisbursementVoucher,
     AdditionalFundRequest,
@@ -15,6 +17,34 @@ class ExpenseCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ExpenseCategory
         fields = ['id', 'name', 'description', 'is_active', 'created_at']
+
+    def validate_name(self, value):
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError('Category name is required.')
+        qs = ExpenseCategory.objects.filter(name__iexact=name)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('A category with this name already exists.')
+        return name
+
+
+class SavedVendorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SavedVendor
+        fields = ['id', 'name', 'created_at']
+
+    def validate_name(self, value):
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError('Vendor name is required.')
+        qs = SavedVendor.objects.filter(name__iexact=name)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('A vendor with this name already exists.')
+        return name
 
 
 class SharedFundAccountSerializer(serializers.ModelSerializer):
@@ -254,6 +284,8 @@ class ExpenseCreateSerializer(serializers.ModelSerializer):
         queryset=SharedFundAccount.objects.filter(is_active=True),
         required=False
     )
+    supporting_document = serializers.FileField(required=True, allow_empty_file=False)
+    save_vendor = serializers.BooleanField(required=False, default=False)
 
     class Meta:
         model = Expense
@@ -264,8 +296,14 @@ class ExpenseCreateSerializer(serializers.ModelSerializer):
             'category',
             'payee',
             'description',
-            'supporting_document'
+            'supporting_document',
+            'save_vendor'
         ]
+
+    def validate_expense_date(self, value):
+        if value and value > timezone.now().date():
+            raise serializers.ValidationError('Future dates cannot be selected for expense claims.')
+        return value
 
     def validate_amount(self, value):
         if value <= 0:
@@ -354,6 +392,8 @@ class AuditLogSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(source='user.email', read_only=True)
     user_name = serializers.CharField(source='user.full_name', read_only=True)
     user_role = serializers.CharField(source='user.role', read_only=True)
+    actor_name = serializers.SerializerMethodField()
+    description = serializers.CharField(source='details', read_only=True)
 
     class Meta:
         model = AuditLog
@@ -363,13 +403,20 @@ class AuditLogSerializer(serializers.ModelSerializer):
             'user_email',
             'user_name',
             'user_role',
+            'actor_name',
             'action',
             'record_type',
             'record_id',
             'details',
+            'description',
             'ip_address',
             'created_at'
         ]
+
+    def get_actor_name(self, obj):
+        if obj.user:
+            return obj.user.full_name or obj.user.username or 'System'
+        return 'System'
 
 
 class FundAllocationSerializer(serializers.ModelSerializer):
@@ -399,6 +446,10 @@ class FundAllocationSerializer(serializers.ModelSerializer):
             'allocator_previous_balance',
             'allocator_new_balance',
             'notes',
+            'voucher_number',
+            'payment_type',
+            'allocation_date',
+            'description',
             'created_at',
         ]
         read_only_fields = ['id', 'allocation_number', 'created_at']

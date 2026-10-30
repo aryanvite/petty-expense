@@ -1,3 +1,4 @@
+import { LoadingScreen } from '../components/GoogleSpinner';
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -111,6 +112,8 @@ export default function Login() {
   };
 
   return (
+    <>
+      {busy && <LoadingScreen fullPage />}
     <div className="login-page-container">
       {/* Decorative Background Radial Orbs matching reference image */}
       <div className="login-bg-orb login-bg-orb-1" />
@@ -519,5 +522,6 @@ export default function Login() {
         </div>
       )}
     </div>
+    </>
   );
 }

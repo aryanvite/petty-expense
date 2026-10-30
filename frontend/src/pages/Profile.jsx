@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import api from '../api';
+import { LoadingScreen } from '../components/GoogleSpinner';
 import { 
   Camera, 
   Trash2, 
@@ -118,8 +119,13 @@ export default function Profile() {
     }
   };
 
+  if (!user) {
+    return <LoadingScreen fullPage />;
+  }
+
   return (
     <div className="page-body">
+      {(uploading || saving) && <LoadingScreen fullPage />}
       <div className="page-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
         <div>
           <h1 className="page-title">My Profile</h1>

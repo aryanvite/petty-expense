@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
   Trash2,
@@ -35,19 +36,25 @@ export function ConfirmProvider({ children }) {
     variant: 'primary', // 'danger' | 'warning' | 'primary' | 'success' | 'info'
     iconType: null,
     isAlertOnly: false,
+    isPrompt: false,
+    inputValue: '',
+    placeholder: 'Enter response...'
   });
 
   const resolverRef = useRef(null);
 
-  const confirm = useCallback(({
-    title = 'Confirm Action',
-    message = 'Are you sure you want to proceed?',
-    subMessage = '',
-    confirmText = 'Confirm',
-    cancelText = 'Cancel',
-    variant = 'primary', // 'primary', 'danger', 'warning', 'success', 'info'
-    icon = null,
-  }) => {
+  const confirm = useCallback((options) => {
+    const opts = typeof options === 'string' ? { message: options } : (options || {});
+    const {
+      title = 'Confirm Action',
+      message = 'Are you sure you want to proceed?',
+      subMessage = '',
+      confirmText = 'Confirm',
+      cancelText = 'Cancel',
+      variant = 'primary', // 'primary', 'danger', 'warning', 'success', 'info'
+      icon = null,
+    } = opts;
+
     return new Promise((resolve) => {
       resolverRef.current = resolve;
       setDialogState({
@@ -60,18 +67,24 @@ export function ConfirmProvider({ children }) {
         variant,
         iconType: icon,
         isAlertOnly: false,
+        isPrompt: false,
+        inputValue: '',
+        placeholder: ''
       });
     });
   }, []);
 
-  const alert = useCallback(({
-    title = 'Notice',
-    message = '',
-    subMessage = '',
-    confirmText = 'Understood',
-    variant = 'primary',
-    icon = null,
-  }) => {
+  const alert = useCallback((options) => {
+    const opts = typeof options === 'string' ? { message: options } : (options || {});
+    const {
+      title = 'Notice',
+      message = '',
+      subMessage = '',
+      confirmText = 'Understood',
+      variant = 'primary',
+      icon = null,
+    } = opts;
+
     return new Promise((resolve) => {
       resolverRef.current = resolve;
       setDialogState({
@@ -84,22 +97,61 @@ export function ConfirmProvider({ children }) {
         variant,
         iconType: icon,
         isAlertOnly: true,
+        isPrompt: false,
+        inputValue: '',
+        placeholder: ''
+      });
+    });
+  }, []);
+
+  const prompt = useCallback((options) => {
+    const opts = typeof options === 'string' ? { message: options } : (options || {});
+    const {
+      title = 'Input Required',
+      message = '',
+      subMessage = '',
+      defaultValue = '',
+      placeholder = 'Enter value...',
+      confirmText = 'Submit',
+      cancelText = 'Cancel',
+      variant = 'primary',
+      icon = null,
+    } = opts;
+
+    return new Promise((resolve) => {
+      resolverRef.current = resolve;
+      setDialogState({
+        isOpen: true,
+        title,
+        message,
+        subMessage,
+        confirmText,
+        cancelText,
+        variant,
+        iconType: icon,
+        isAlertOnly: false,
+        isPrompt: true,
+        inputValue: defaultValue || '',
+        placeholder: placeholder || 'Enter value...'
       });
     });
   }, []);
 
   const handleConfirm = () => {
+    const isPrompt = dialogState.isPrompt;
+    const value = dialogState.inputValue;
     setDialogState((prev) => ({ ...prev, isOpen: false }));
     if (resolverRef.current) {
-      resolverRef.current(true);
+      resolverRef.current(isPrompt ? value : true);
       resolverRef.current = null;
     }
   };
 
   const handleCancel = () => {
+    const isPrompt = dialogState.isPrompt;
     setDialogState((prev) => ({ ...prev, isOpen: false }));
     if (resolverRef.current) {
-      resolverRef.current(false);
+      resolverRef.current(isPrompt ? null : false);
       resolverRef.current = null;
     }
   };
@@ -119,7 +171,45 @@ export function ConfirmProvider({ children }) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [dialogState.isOpen]);
+  }, [dialogState.isOpen, dialogState.inputValue]);
+
+  // Global window interceptor for native dialogs
+  useEffect(() => {
+    const originalAlert = window.alert;
+    const originalConfirm = window.confirm;
+    const originalPrompt = window.prompt;
+
+    window.alert = (msg) => {
+      return alert(typeof msg === 'object' ? JSON.stringify(msg, null, 2) : String(msg ?? ''));
+    };
+
+    window.confirm = (msg) => {
+      return confirm({
+        title: 'Confirmation',
+        message: typeof msg === 'object' ? JSON.stringify(msg, null, 2) : String(msg ?? ''),
+        variant: 'warning',
+        confirmText: 'Confirm',
+        cancelText: 'Cancel'
+      });
+    };
+
+    window.prompt = (msg, defaultVal = '') => {
+      return prompt({
+        title: 'Input Required',
+        message: typeof msg === 'object' ? JSON.stringify(msg, null, 2) : String(msg ?? ''),
+        defaultValue: defaultVal,
+        placeholder: 'Enter response...',
+        confirmText: 'Submit',
+        cancelText: 'Cancel'
+      });
+    };
+
+    return () => {
+      window.alert = originalAlert;
+      window.confirm = originalConfirm;
+      window.prompt = originalPrompt;
+    };
+  }, [alert, confirm, prompt]);
 
   // Variant themes matching the UI specifications
   const getTheme = () => {
@@ -170,7 +260,7 @@ export function ConfirmProvider({ children }) {
           iconBg: '#eff6ff',
           iconBorder: '#bfdbfe',
           iconColor: '#2563eb',
-          btnBg: '#2563eb', // Matches the Edit Profile blue in user photo
+          btnBg: '#2563eb',
           btnHover: '#1d4ed8',
           btnText: '#ffffff',
           defaultIcon: <HelpCircle size={24} />,
@@ -203,6 +293,8 @@ export function ConfirmProvider({ children }) {
       case 'check':
       case 'success':
         return <CheckCircle2 size={24} />;
+      case 'info':
+        return <Info size={24} />;
       default:
         return getTheme().defaultIcon;
     }
@@ -211,40 +303,45 @@ export function ConfirmProvider({ children }) {
   const theme = getTheme();
 
   return (
-    <ConfirmContext.Provider value={{ confirm, alert }}>
+    <ConfirmContext.Provider value={{ confirm, alert, prompt }}>
       {children}
 
-      {/* Universal System Alert Modal Dialog */}
-      {dialogState.isOpen && (
+      {/* Universal Default Popup Dialog (matches app theme & animations) */}
+      {dialogState.isOpen && typeof document !== 'undefined' && createPortal(
         <div
           className="modal-overlay-custom"
           style={{
-            zIndex: 9999,
+            zIndex: 2000000,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             padding: '1rem',
           }}
           onClick={handleCancel}
+          role="dialog"
+          aria-modal="true"
         >
           <div
+            className="modal-content"
             onClick={(e) => e.stopPropagation()}
             style={{
               background: '#ffffff',
               borderRadius: '16px',
-              maxWidth: '440px',
+              maxWidth: '450px',
               width: '100%',
+              padding: 0,
               boxShadow: '0 25px 50px -12px rgba(15, 23, 42, 0.25), 0 0 0 1px rgba(226, 232, 240, 0.9)',
               overflow: 'hidden',
               display: 'flex',
               flexDirection: 'column',
-              animation: 'fadeInScale 0.18s ease-out forwards',
+              transformOrigin: 'center center',
             }}
           >
             {/* Header / Body Container */}
             <div style={{ padding: '1.5rem 1.5rem 1.25rem', position: 'relative' }}>
               {/* Close Button */}
               <button
+                type="button"
                 onClick={handleCancel}
                 style={{
                   position: 'absolute',
@@ -271,8 +368,8 @@ export function ConfirmProvider({ children }) {
               {/* Styled Icon Badge */}
               <div
                 style={{
-                  width: '52px',
-                  height: '52px',
+                  width: '50px',
+                  height: '50px',
                   borderRadius: '14px',
                   background: theme.iconBg,
                   border: `1px solid ${theme.iconBorder}`,
@@ -303,7 +400,7 @@ export function ConfirmProvider({ children }) {
               {/* Message */}
               <p
                 style={{
-                  fontSize: '0.875rem',
+                  fontSize: '0.88rem',
                   color: '#475569',
                   lineHeight: '1.5',
                   margin: 0,
@@ -311,6 +408,21 @@ export function ConfirmProvider({ children }) {
               >
                 {dialogState.message}
               </p>
+
+              {/* Input for Prompt Dialogs */}
+              {dialogState.isPrompt && (
+                <div style={{ marginTop: '1rem' }}>
+                  <input
+                    type="text"
+                    autoFocus
+                    className="form-input"
+                    value={dialogState.inputValue}
+                    placeholder={dialogState.placeholder}
+                    onChange={(e) => setDialogState(prev => ({ ...prev, inputValue: e.target.value }))}
+                    style={{ width: '100%', padding: '9px 12px', fontSize: '0.88rem', borderRadius: '8px' }}
+                  />
+                </div>
+              )}
 
               {/* Sub-Message Callout Box */}
               {dialogState.subMessage && (
@@ -334,7 +446,7 @@ export function ConfirmProvider({ children }) {
             {/* Footer Buttons matching UI Theme */}
             <div
               style={{
-                padding: '1rem 1.5rem',
+                padding: '0.9rem 1.5rem',
                 borderTop: '1px solid #f1f5f9',
                 background: '#fafafa',
                 display: 'flex',
@@ -349,7 +461,7 @@ export function ConfirmProvider({ children }) {
                   onClick={handleCancel}
                   className="btn btn-secondary btn-sm"
                   style={{
-                    padding: '8px 16px',
+                    padding: '7px 16px',
                     fontSize: '0.85rem',
                     fontWeight: 600,
                     borderRadius: '8px',
@@ -363,12 +475,13 @@ export function ConfirmProvider({ children }) {
               <button
                 type="button"
                 onClick={handleConfirm}
+                className="btn btn-sm"
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '6px',
-                  padding: '8px 18px',
+                  padding: '7px 18px',
                   fontSize: '0.85rem',
                   fontWeight: 600,
                   borderRadius: '8px',
@@ -386,9 +499,9 @@ export function ConfirmProvider({ children }) {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </ConfirmContext.Provider>
   );
 }
-

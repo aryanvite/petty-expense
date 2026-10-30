@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import api, { getMediaUrl, formatDate, formatDateTime, fetchDepartments, createDepartment } from '../api';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
+import { LoadingScreen } from '../components/GoogleSpinner';
+import SearchableDropdown from '../components/SearchableDropdown';
 import TableHeadSortMenu, { TableColumnsButton, ScrollTableToolbar, exportToCSV } from '../components/TableHeadSortMenu';
 import {
   ArrowLeft,
@@ -521,14 +523,7 @@ export default function EmployeeDetail() {
   };
 
   if (loading) {
-    return (
-      <div className="page-body" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh' }}>
-        <RefreshCw size={28} className="animate-spin" style={{ color: '#2563eb', marginBottom: '12px' }} />
-        <div style={{ color: '#64748b', fontSize: '0.95rem', fontWeight: 500 }}>
-          Loading employee details and expense history...
-        </div>
-      </div>
-    );
+    return <LoadingScreen fullPage size={48} />;
   }
 
   if (!emp) {
@@ -1078,10 +1073,7 @@ export default function EmployeeDetail() {
                               title="View claim history and breakdown"
                             >
                               <Eye size={13} />
-                              <span className="table-btn-view-text">
-                                <span>View</span>
-                                <span>More</span>
-                              </span>
+                              <span>View Details</span>
                             </button>
                           </div>
                         </td>
@@ -1568,20 +1560,18 @@ export default function EmployeeDetail() {
 
                     {!showInlineDeptInput ? (
                       <div style={{ display: 'flex', gap: '6px' }}>
-                        <select
+                        <SearchableDropdown
                           value={editForm.department}
-                          onChange={(e) => setEditForm(prev => ({ ...prev, department: e.target.value }))}
-                          className="form-input"
+                          onChange={(val) => setEditForm(prev => ({ ...prev, department: val }))}
+                          options={departmentsList.map(d => ({
+                            value: d.name,
+                            label: d.name,
+                            code: d.code || 'DEPT'
+                          }))}
+                          placeholder="Select Department..."
+                          searchPlaceholder="Search departments..."
                           style={{ flex: 1 }}
-                        >
-                          <option value="">Select Department...</option>
-                          {departmentsList.map(d => (
-                            <option key={d.id} value={d.name}>{d.name}</option>
-                          ))}
-                          {editForm.department && !departmentsList.some(d => d.name === editForm.department) && (
-                            <option value={editForm.department}>{editForm.department}</option>
-                          )}
-                        </select>
+                        />
                         <button
                           type="button"
                           onClick={() => setShowInlineDeptInput(true)}

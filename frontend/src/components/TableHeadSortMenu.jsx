@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import SearchableDropdown from './SearchableDropdown';
 import { 
   MoreVertical, 
   ArrowUp, 
@@ -346,28 +347,15 @@ export function ScrollTableToolbar({
                 {f.label}:
               </span>
             )}
-            <select
+            <SearchableDropdown
               value={f.value}
-              onChange={(e) => f.onChange(e.target.value)}
-              className="form-input"
-              style={{
-                height: '34px',
-                padding: '0 8px',
-                fontSize: '0.825rem',
-                borderRadius: '6px',
-                border: '1px solid #cbd5e1',
-                background: '#ffffff',
-                color: '#0f172a',
-                fontWeight: 500,
-                cursor: 'pointer'
-              }}
-            >
-              {f.options.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+              onChange={(val) => f.onChange(val)}
+              options={f.options}
+              size="sm"
+              allowClear={false}
+              searchPlaceholder={`Search ${f.label || 'filter'}...`}
+              style={{ minWidth: '130px' }}
+            />
           </div>
         ))}
       </div>
@@ -484,6 +472,8 @@ export default function TableHeadSortMenu({
   const effectiveWidth = width || style.width || style.minWidth;
   const effectiveMinWidth = style.minWidth || width || style.width;
 
+  const isFiltered = Boolean(filterConfig && (filterConfig.value !== undefined && filterConfig.value !== null && String(filterConfig.value).trim() !== ''));
+
   return (
     <th 
       ref={rootRef}
@@ -514,9 +504,28 @@ export default function TableHeadSortMenu({
           verticalAlign: 'middle'
         }}
       >
-        <span style={{ fontWeight: isThisColumnActive ? 700 : 600 }}>
+        <span style={{ fontWeight: isThisColumnActive || isFiltered ? 700 : 600 }}>
           {label}
         </span>
+
+        {isFiltered && (
+          <span
+            title={`Filtered by: "${filterConfig.value}"`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '16px',
+              height: '16px',
+              borderRadius: '50%',
+              background: '#eff6ff',
+              color: '#0284c7',
+              border: '1px solid #bfdbfe'
+            }}
+          >
+            <Search size={10} strokeWidth={2.4} />
+          </span>
+        )}
 
         {/* Up-and-down arrow icon morphing into 3-dots on hover */}
         <button
@@ -534,19 +543,19 @@ export default function TableHeadSortMenu({
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: open || isThisColumnActive ? '#0284c7' : '#64748b',
+            color: open || isThisColumnActive || isFiltered ? '#0284c7' : '#64748b',
             transition: 'background 0.15s ease',
             lineHeight: 1,
             flexShrink: 0
           }}
-          title={isHovered ? "Sort options" : "Sort column"}
-          aria-label="Column sort options"
+          title={isHovered ? "Sort & Search options" : "Column options"}
+          aria-label="Column sort and search options"
         >
           {renderSortIcon()}
         </button>
       </div>
 
-      {/* POPUP MENU: JUST SORT ASC AND SORT DESC (and Reset) */}
+      {/* POPUP MENU: SEARCH + SORT ASC + SORT DESC + RESET */}
       {open && (
         <div
           style={{
@@ -559,8 +568,8 @@ export default function TableHeadSortMenu({
             border: '1px solid #cbd5e1',
             borderRadius: '8px',
             boxShadow: '0 10px 25px -5px rgba(0,0,0,0.15), 0 8px 10px -6px rgba(0,0,0,0.1)',
-            minWidth: '150px',
-            padding: '5px',
+            minWidth: '175px',
+            padding: '6px',
             textAlign: 'left',
             fontWeight: 400,
             fontSize: '0.8rem',
@@ -568,6 +577,67 @@ export default function TableHeadSortMenu({
           }}
           onClick={(e) => e.stopPropagation()}
         >
+          {/* SEARCH IN COLUMN */}
+          {(onFilterChange || filterConfig !== undefined) && (
+            <div style={{ padding: '3px 4px 6px', borderBottom: '1px solid #f1f5f9', marginBottom: '5px' }}>
+              <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                <Search size={13} color="#94a3b8" style={{ position: 'absolute', left: '8px', pointerEvents: 'none' }} />
+                <input
+                  type="text"
+                  placeholder={`Search ${label}...`}
+                  value={filterConfig?.value || ''}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (onFilterChange) {
+                      onFilterChange(val ? { operator: 'Contains', value: val } : null);
+                    }
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') setOpen(false);
+                  }}
+                  autoFocus
+                  style={{
+                    width: '100%',
+                    paddingLeft: '26px',
+                    paddingRight: filterConfig?.value ? '20px' : '6px',
+                    height: '28px',
+                    fontSize: '0.78rem',
+                    borderRadius: '5px',
+                    border: '1px solid #cbd5e1',
+                    outline: 'none',
+                    background: '#ffffff',
+                    color: '#0f172a',
+                    boxSizing: 'border-box'
+                  }}
+                />
+                {filterConfig?.value && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (onFilterChange) onFilterChange(null);
+                    }}
+                    style={{
+                      position: 'absolute',
+                      right: '6px',
+                      background: 'none',
+                      border: 'none',
+                      padding: 0,
+                      cursor: 'pointer',
+                      color: '#94a3b8',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}
+                    title="Clear filter"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* SORT ASC */}
           <button
             type="button"
@@ -577,7 +647,7 @@ export default function TableHeadSortMenu({
               alignItems: 'center',
               gap: '8px',
               width: '100%',
-              padding: '7px 10px',
+              padding: '6px 8px',
               background: activeSortDir === 'asc' ? '#eff6ff' : 'transparent',
               color: activeSortDir === 'asc' ? '#0284c7' : '#334155',
               fontWeight: activeSortDir === 'asc' ? 600 : 500,
@@ -609,7 +679,7 @@ export default function TableHeadSortMenu({
               alignItems: 'center',
               gap: '8px',
               width: '100%',
-              padding: '7px 10px',
+              padding: '6px 8px',
               background: activeSortDir === 'desc' ? '#eff6ff' : 'transparent',
               color: activeSortDir === 'desc' ? '#0284c7' : '#334155',
               fontWeight: activeSortDir === 'desc' ? 600 : 500,
@@ -634,30 +704,63 @@ export default function TableHeadSortMenu({
 
           <div style={{ height: '1px', background: '#f1f5f9', margin: '4px 0' }} />
 
+          {/* CLEAR FILTER (if filtered) */}
+          {isFiltered && (
+            <button
+              type="button"
+              onClick={() => {
+                if (onFilterChange) onFilterChange(null);
+                setOpen(false);
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                width: '100%',
+                padding: '6px 8px',
+                background: '#fef2f2',
+                color: '#dc2626',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '0.78rem',
+                fontWeight: 600,
+                textAlign: 'left',
+                marginBottom: '4px'
+              }}
+            >
+              <X size={13} color="#dc2626" />
+              <span>Clear search filter</span>
+            </button>
+          )}
+
           {/* RESET SORT */}
           <button
             type="button"
-            onClick={handleResetSort}
+            onClick={() => {
+              handleResetSort();
+              if (onFilterChange && isFiltered) onFilterChange(null);
+            }}
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: '8px',
               width: '100%',
-              padding: '7px 10px',
+              padding: '6px 8px',
               background: 'transparent',
-              color: '#ef4444',
+              color: '#64748b',
               border: 'none',
               borderRadius: '6px',
               cursor: 'pointer',
-              fontSize: '0.8rem',
+              fontSize: '0.78rem',
               textAlign: 'left',
               transition: 'background 0.15s ease'
             }}
-            onMouseEnter={(e) => e.currentTarget.style.background = '#fef2f2'}
+            onMouseEnter={(e) => e.currentTarget.style.background = '#f1f5f9'}
             onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
           >
-            <RotateCcw size={13} color="#ef4444" />
-            <span>Reset sort</span>
+            <RotateCcw size={13} color="#64748b" />
+            <span>Reset column</span>
           </button>
         </div>
       )}

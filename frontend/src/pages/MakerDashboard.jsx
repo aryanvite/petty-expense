@@ -1,9 +1,13 @@
+import { createPortal } from 'react-dom';
 import React, { useState, useEffect, useMemo } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useLocation } from 'react-router-dom';
 import api, { getMediaUrl, formatDate, formatDateTime } from '../api';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
+import { LoadingScreen } from '../components/GoogleSpinner';
 import TableHeadSortMenu from '../components/TableHeadSortMenu';
+import SearchableDropdown from '../components/SearchableDropdown';
+import SubmitExpenseModal from '../components/SubmitExpenseModal';
 import {
   Wallet,
   Clock,
@@ -28,12 +32,15 @@ import {
   Calendar,
   Layers,
   Check,
-  Bell
+  Bell,
+  Users,
+  History
 } from 'lucide-react';
 
 export default function MakerDashboard() {
   const { user } = useAuth();
   const { confirm } = useConfirm();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = searchParams.get('tab') || 'dashboard';
 
@@ -43,10 +50,23 @@ export default function MakerDashboard() {
 
   // State
   const [loading, setLoading] = useState(true);
+  const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [summary, setSummary] = useState(null);
   const [expenses, setExpenses] = useState([]);
   const [fundRequests, setFundRequests] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [allocations, setAllocations] = useState([]);
+  const [historySubTab, setHistorySubTab] = useState('all'); // 'all', 'allocations', 'expenses'
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPageSize, setHistoryPageSize] = useState(10);
+  const [historySortKey, setHistorySortKey] = useState('date');
+  const [historySortDir, setHistorySortDir] = useState('desc');
+  // Funds Breakdown Modal state
+  const [fundModalType, setFundModalType] = useState(null); // 'allocated' | 'used' | 'remaining' | null
+  const [fundModalSearch, setFundModalSearch] = useState('');
+  const [fundModalRoleFilter, setFundModalRoleFilter] = useState('ALL'); // 'ALL' | 'MAKER' | 'CHECKER'
   const [notification, setNotification] = useState({ type: '', text: '' });
   const [lastRefreshText, setLastRefreshText] = useState(user?.last_refresh_formatted || '');
 
@@ -115,16 +135,15 @@ export default function MakerDashboard() {
     setTimeout(() => setNotification({ type: '', text: '' }), 6000);
   };
 
-  const loadData = async (accId = null) => {
-    setLoading(true);
+  const loadDashboardData = async (accId = null) => {
     try {
       const targetAccId = accId || selectedAccountId;
       const summaryUrl = targetAccId ? `/dashboard/summary/?account=${targetAccId}` : '/dashboard/summary/';
-      const [sumRes, expRes, fundRes, catRes] = await Promise.all([
+      const [sumRes, expRes, fundRes, empRes] = await Promise.all([
         api.get(summaryUrl),
         api.get('/expenses/'),
         api.get('/fund-requests/'),
-        api.get('/categories/')
+        api.get('/admin/employees/').catch(() => ({ data: [] }))
       ]);
       setSummary(sumRes.data);
       if (sumRes.data?.last_refresh_str) {
@@ -140,23 +159,295 @@ export default function MakerDashboard() {
         setFundReqAccountId(prev => prev || activeAcc.id);
       }
 
-      setExpenses(expRes.data);
-      setFundRequests(fundRes.data);
-      setCategories(catRes.data);
-      if (catRes.data.length > 0 && !category) {
-        setCategory(catRes.data[0].name);
+      setExpenses(expRes.data || []);
+      setFundRequests(fundRes.data || []);
+      setEmployees(empRes.data || []);
+    } catch (err) {
+      console.error('Failed to load maker dashboard data:', err);
+    }
+  };
+
+  const loadExpensesData = async () => {
+    try {
+      const [expRes, catRes] = await Promise.all([
+        api.get('/expenses/').catch(() => ({ data: [] })),
+        categories.length === 0 ? api.get('/categories/').catch(() => ({ data: [] })) : Promise.resolve({ data: categories })
+      ]);
+      setExpenses(expRes.data || []);
+      if (categories.length === 0 && catRes?.data) {
+        setCategories(catRes.data);
+        if (catRes.data.length > 0 && !category) {
+          setCategory(catRes.data[0].name);
+        }
       }
     } catch (err) {
-      console.error(err);
-      notify('error', 'Failed to load dashboard data. Please try refreshing.');
+      console.error('Failed to load maker expenses:', err);
+    }
+  };
+
+  const loadFundsData = async () => {
+    try {
+      const fundRes = await api.get('/fund-requests/').catch(() => ({ data: [] }));
+      setFundRequests(fundRes.data || []);
+    } catch (err) {
+      console.error('Failed to load maker fund requests:', err);
+    }
+  };
+
+  const loadHistoryData = async () => {
+    try {
+      const [allocRes, expRes] = await Promise.all([
+        api.get('/allocations/').catch(() => ({ data: [] })),
+        expenses.length === 0 ? api.get('/expenses/').catch(() => ({ data: [] })) : Promise.resolve({ data: expenses })
+      ]);
+      setAllocations(allocRes.data || []);
+      if (expenses.length === 0 && expRes?.data) setExpenses(expRes.data);
+    } catch (err) {
+      console.error('Failed to load maker history:', err);
+    }
+  };
+
+  const loadTabFeature = async (tab) => {
+    setLoading(true);
+    try {
+      switch (tab) {
+        case 'expenses':
+          await loadExpensesData();
+          break;
+        case 'funds':
+          await loadFundsData();
+          break;
+        case 'history':
+          await loadHistoryData();
+          break;
+        case 'notifications':
+          break;
+        case 'dashboard':
+        default:
+          await loadDashboardData();
+          break;
+      }
+    } catch (err) {
+      console.error(`Error loading maker tab ${tab}:`, err);
     } finally {
       setLoading(false);
     }
   };
 
+  const loadData = async (accId = null) => {
+    if (accId) {
+      return loadDashboardData(accId);
+    }
+    return loadTabFeature(activeTab);
+  };
+
+  const totalAllocatedAllStaff = useMemo(() => {
+    return employees
+      .filter(e => ['MAKER', 'CHECKER'].includes(e.role))
+      .reduce((sum, e) => sum + (Number(e.allocated_funds) || 0), 0);
+  }, [employees]);
+
+  const totalUsedAllStaff = useMemo(() => {
+    return employees
+      .filter(e => ['MAKER', 'CHECKER'].includes(e.role))
+      .reduce((sum, e) => sum + (Number(e.funds_used) || 0), 0);
+  }, [employees]);
+
+  const totalRemainingAllStaff = useMemo(() => {
+    return totalAllocatedAllStaff - totalUsedAllStaff;
+  }, [totalAllocatedAllStaff, totalUsedAllStaff]);
+
+  const staffBalanceBreakdown = useMemo(() => {
+    if (!fundModalType) return [];
+    const staff = employees.filter(e => ['MAKER', 'CHECKER'].includes(e.role));
+    const mapped = staff.map(e => {
+      const allocated = Number(e.allocated_funds) || 0;
+      const used = Number(e.funds_used) || 0;
+      const remaining = e.funds_remaining !== undefined ? Number(e.funds_remaining) : (allocated - used);
+      return {
+        ...e,
+        allocated,
+        used,
+        remaining
+      };
+    });
+
+    let filtered = mapped;
+    if (fundModalRoleFilter !== 'ALL') {
+      filtered = filtered.filter(e => e.role === fundModalRoleFilter);
+    }
+
+    if (fundModalSearch.trim()) {
+      const q = fundModalSearch.toLowerCase();
+      filtered = filtered.filter(e =>
+        (e.full_name && e.full_name.toLowerCase().includes(q)) ||
+        (e.employee_id && e.employee_id.toLowerCase().includes(q)) ||
+        (e.department && e.department.toLowerCase().includes(q)) ||
+        (e.designation && e.designation.toLowerCase().includes(q)) ||
+        (e.email && e.email.toLowerCase().includes(q))
+      );
+    }
+
+    return filtered.sort((a, b) => {
+      if (fundModalType === 'allocated') {
+        return b.allocated - a.allocated;
+      }
+      if (fundModalType === 'used') {
+        return b.used - a.used;
+      }
+      if (fundModalType === 'remaining') {
+        return b.remaining - a.remaining;
+      }
+      return 0;
+    });
+  }, [employees, fundModalType, fundModalSearch, fundModalRoleFilter]);
+
   useEffect(() => {
-    loadData();
-  }, []);
+    const isAnyModalOpen = Boolean(
+      fundModalType ||
+      selectedExpense ||
+      selectedFundReq ||
+      showNewFundModal
+    );
+    if (isAnyModalOpen) {
+      document.body.classList.add('modal-open');
+    } else {
+      document.body.classList.remove('modal-open');
+    }
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (selectedFundReq) setSelectedFundReq(null);
+        else if (selectedExpense) setSelectedExpense(null);
+        else if (showNewFundModal) setShowReqModal(false);
+        else if (fundModalType) setFundModalType(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.classList.remove('modal-open');
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [fundModalType, selectedExpense, selectedFundReq, showNewFundModal]);
+
+  // ==========================================================
+  // MAKER FINANCIAL HISTORY (ALLOCATIONS & EXPENSES)
+  // ==========================================================
+  const makerAllocationsList = useMemo(() => {
+    return (allocations || []).map(a => ({
+      id: `alloc-${a.id}`,
+      rawId: a.id,
+      type: 'ALLOCATION',
+      timestamp: new Date(a.created_at || 0).getTime(),
+      dateFormatted: formatDateTime(a.created_at),
+      refNumber: a.allocation_number || `ALC-${String(a.id).padStart(4, '0')}`,
+      entity: a.allocated_by_name || 'Admin',
+      role: a.allocator_role || 'ADMIN',
+      category: 'Fund Allocation',
+      amount: parseFloat(a.amount || 0),
+      balanceAfter: a.recipient_new_balance != null ? parseFloat(a.recipient_new_balance) : null,
+      notes: a.notes || 'Fund credit limit allocation',
+      status: 'COMPLETED',
+      raw: a
+    }));
+  }, [allocations]);
+
+  const makerExpensesList = useMemo(() => {
+    return (expenses || []).map(e => ({
+      id: `exp-${e.id}`,
+      rawId: e.id,
+      type: 'EXPENSE',
+      timestamp: new Date(e.created_at || e.expense_date || 0).getTime(),
+      dateFormatted: formatDateTime(e.created_at || e.expense_date),
+      refNumber: e.reference_number || `EXP-${String(e.id).padStart(4, '0')}`,
+      entity: e.payee || 'Payee / Merchant',
+      role: 'MAKER',
+      category: e.category || 'General',
+      amount: parseFloat(e.amount || 0),
+      balanceAfter: null,
+      notes: e.description || '',
+      status: e.status,
+      receipt: e.supporting_document,
+      raw: e
+    }));
+  }, [expenses]);
+
+  const makerTotalAllocated = useMemo(() => {
+    return makerAllocationsList.reduce((sum, item) => sum + item.amount, 0);
+  }, [makerAllocationsList]);
+
+  const makerTotalSpent = useMemo(() => {
+    return (expenses || [])
+      .filter(e => !['REJECTED_BY_CHECKER', 'REJECTED_BY_ADMIN', 'CANCELLED'].includes(e.status))
+      .reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
+  }, [expenses]);
+
+  const filteredMakerHistory = useMemo(() => {
+    let items = [];
+    if (historySubTab === 'allocations') {
+      items = [...makerAllocationsList];
+    } else if (historySubTab === 'expenses') {
+      items = [...makerExpensesList];
+    } else {
+      items = [...makerAllocationsList, ...makerExpensesList];
+    }
+
+    if (historySearch.trim()) {
+      const q = historySearch.toLowerCase();
+      items = items.filter(it => 
+        (it.refNumber || '').toLowerCase().includes(q) ||
+        (it.entity || '').toLowerCase().includes(q) ||
+        (it.category || '').toLowerCase().includes(q) ||
+        (it.notes || '').toLowerCase().includes(q) ||
+        (it.status || '').toLowerCase().includes(q) ||
+        (it.dateFormatted || '').toLowerCase().includes(q)
+      );
+    }
+
+    items.sort((a, b) => {
+      if (historySortKey === 'date') {
+        return historySortDir === 'asc' ? a.timestamp - b.timestamp : b.timestamp - a.timestamp;
+      }
+      if (historySortKey === 'amount') {
+        return historySortDir === 'asc' ? a.amount - b.amount : b.amount - a.amount;
+      }
+      if (historySortKey === 'entity') {
+        return historySortDir === 'asc' ? (a.entity || '').localeCompare(b.entity || '') : (b.entity || '').localeCompare(a.entity || '');
+      }
+      return historySortDir === 'asc' ? a.timestamp - b.timestamp : b.timestamp - a.timestamp;
+    });
+
+    return items;
+  }, [makerAllocationsList, makerExpensesList, historySubTab, historySearch, historySortKey, historySortDir]);
+
+  const paginatedMakerHistory = useMemo(() => {
+    const start = (historyPage - 1) * historyPageSize;
+    return filteredMakerHistory.slice(start, start + historyPageSize);
+  }, [filteredMakerHistory, historyPage, historyPageSize]);
+
+  const historyTotalPages = Math.ceil(filteredMakerHistory.length / historyPageSize) || 1;
+
+  useEffect(() => {
+    if (activeTab === 'submit') {
+      setShowSubmitModal(true);
+      setActiveTab('dashboard');
+      return;
+    }
+    loadTabFeature(activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (fundModalType && employees.length === 0) {
+      api.get('/admin/employees/').then(res => {
+        setEmployees(res.data || []);
+      }).catch(err => console.error('Failed to load employees for fund modal:', err));
+    }
+  }, [fundModalType, employees.length]);
+
+  useEffect(() => {
+    const handleReload = () => loadTabFeature(activeTab);
+    window.addEventListener('app:reload-data', handleReload);
+    return () => window.removeEventListener('app:reload-data', handleReload);
+  }, [activeTab]);
 
   useEffect(() => {
     if (user?.last_refresh_formatted && !lastRefreshText) {
@@ -772,22 +1063,21 @@ export default function MakerDashboard() {
     notify('success', 'All notifications marked as read.');
   };
 
+  if (loading && activeTab === 'dashboard' && !summary) {
+    return <LoadingScreen fullPage />;
+  }
+
   return (
     <div className="page-body">
       {/* 1. Dashboard Header (Workman Spec) */}
       <div className="page-header" style={{ marginBottom: '1.25rem' }}>
         <div>
-          <h1 className="page-title" style={{ fontSize: '1.6rem', color: '#0f172a', fontWeight: 700 }}>
-            {activeTab === 'dashboard' ? 'Dashboard' :
-             activeTab === 'submit' ? 'Submit Expense' :
-             activeTab === 'expenses' ? 'My Expenses' :
-             activeTab === 'notifications' ? 'Notifications' : 'Additional Fund Requests'}
-          </h1>
-          <p className="page-subtitle" style={{ color: '#64748b', fontSize: '0.875rem', marginTop: '3px' }}>
+          <p className="page-subtitle" style={{ color: '#64748b', fontSize: '0.9rem', margin: 0 }}>
             {activeTab === 'dashboard' ? 'Overview of your petty cash expenses and approval status.' :
              activeTab === 'submit' ? 'Submit a new petty cash expense claim.' :
              activeTab === 'expenses' ? 'Complete history of all your submitted petty cash claims.' :
              activeTab === 'notifications' ? 'Real-time updates regarding Checker verifications and Admin approvals.' :
+             activeTab === 'history' ? 'Audit history of funds allocated to your account and complete spending records with date and time.' :
              'View and manage your additional petty cash replenishment requests submitted to Admin.'}
           </p>
         </div>
@@ -824,7 +1114,7 @@ export default function MakerDashboard() {
                 </button>
               </>
             ) : activeTab !== 'submit' && activeTab !== 'dashboard' ? (
-              <button onClick={() => setActiveTab('submit')} className="btn btn-primary btn-sm">
+              <button onClick={() => setShowSubmitModal(true)} className="btn btn-primary btn-sm">
                 <PlusCircle size={15} />
                 <span>Submit Expense</span>
               </button>
@@ -880,7 +1170,7 @@ export default function MakerDashboard() {
             <div className="admin-fund-summary-actions" style={{ justifyContent: 'flex-start', margin: '0 0 1.25rem 0' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-start' }}>
                 <button
-                  onClick={() => setActiveTab('submit')}
+                  onClick={() => setShowSubmitModal(true)}
                   className="btn btn-primary"
                   style={{
                     background: '#2563eb',
@@ -925,7 +1215,10 @@ export default function MakerDashboard() {
 
             <div className="admin-balance-card-grid">
               {/* Card 1: Funds Allocated */}
-              <article className="admin-balance-card admin-balance-available">
+              <article
+                className="admin-balance-card admin-balance-available"
+                style={{ cursor: 'default' }}
+              >
                 <div className="admin-balance-card-icon"><Wallet size={27} /></div>
                 <div className="admin-balance-card-content">
                   <div className="admin-balance-card-label">Funds Allocated</div>
@@ -937,7 +1230,10 @@ export default function MakerDashboard() {
               </article>
 
               {/* Card 2: Funds Used */}
-              <article className="admin-balance-card admin-balance-commitments">
+              <article
+                className="admin-balance-card admin-balance-commitments"
+                style={{ cursor: 'default' }}
+              >
                 <div className="admin-balance-card-icon"><ReceiptIndianRupee size={27} /></div>
                 <div className="admin-balance-card-content">
                   <div className="admin-balance-card-label">Funds Used</div>
@@ -955,7 +1251,10 @@ export default function MakerDashboard() {
                   : ((user?.allocated_funds || 0) - (user?.funds_used || 0));
                 const isDeficit = rem < 0;
                 return (
-                  <article className={`admin-balance-card ${isDeficit ? 'admin-balance-deficit' : 'admin-balance-ledger'}`}>
+                  <article
+                    className={`admin-balance-card ${isDeficit ? 'admin-balance-deficit' : 'admin-balance-ledger'}`}
+                    style={{ cursor: 'default' }}
+                  >
                     <div className="admin-balance-card-icon"><FileText size={27} /></div>
                     <div className="admin-balance-card-content">
                       <div className="admin-balance-card-label">Funds Remaining</div>
@@ -1084,43 +1383,49 @@ export default function MakerDashboard() {
               {/* Status Filter */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>Status:</span>
-                <select
-                  className="form-input"
-                  style={{ width: '180px' }}
+                <SearchableDropdown
                   value={statusFilter}
-                  onChange={(e) => {
-                    setStatusFilter(e.target.value);
+                  onChange={(val) => {
+                    setStatusFilter(val || 'ALL');
                     setCurrentPage(1);
                   }}
-                >
-                  <option value="ALL">All Statuses</option>
-                  <option value="PENDING">All Pending</option>
-                  <option value="SUBMITTED">Pending Checker</option>
-                  <option value="ACCEPTED_BY_CHECKER">Approved by Checker</option>
-                  <option value="SENT_TO_ADMIN">Escalated to Admin</option>
-                  <option value="ACCEPTED_BY_ADMIN">Approved</option>
-                  <option value="REJECTED_BY_ADMIN">Rejected</option>
-                  <option value="CANCELLED">Cancelled</option>
-                </select>
+                  options={[
+                    { value: 'ALL', label: 'All Statuses' },
+                    { value: 'PENDING', label: 'All Pending' },
+                    { value: 'SUBMITTED', label: 'Pending Checker' },
+                    { value: 'ACCEPTED_BY_CHECKER', label: 'Approved by Checker' },
+                    { value: 'SENT_TO_ADMIN', label: 'Escalated to Admin' },
+                    { value: 'ACCEPTED_BY_ADMIN', label: 'Approved' },
+                    { value: 'REJECTED_BY_ADMIN', label: 'Rejected' },
+                    { value: 'CANCELLED', label: 'Cancelled' },
+                  ]}
+                  placeholder="All Statuses"
+                  searchPlaceholder="Search statuses..."
+                  allowClear={false}
+                  size="sm"
+                  style={{ width: '180px' }}
+                />
               </div>
 
               {/* Category Filter */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>Category:</span>
-                <select
-                  className="form-input"
-                  style={{ width: '160px' }}
+                <SearchableDropdown
                   value={categoryFilter}
-                  onChange={(e) => {
-                    setCategoryFilter(e.target.value);
+                  onChange={(val) => {
+                    setCategoryFilter(val || 'ALL');
                     setCurrentPage(1);
                   }}
-                >
-                  <option value="ALL">All Categories</option>
-                  {categories.map((c) => (
-                    <option key={c.id || c.name} value={c.name}>{c.name}</option>
-                  ))}
-                </select>
+                  options={[
+                    { value: 'ALL', label: 'All Categories' },
+                    ...categories.map(c => ({ value: c.name, label: c.name }))
+                  ]}
+                  placeholder="All Categories"
+                  searchPlaceholder="Search categories..."
+                  allowClear={false}
+                  size="sm"
+                  style={{ width: '160px' }}
+                />
               </div>
             </div>
 
@@ -1222,10 +1527,11 @@ export default function MakerDashboard() {
 
           {/* Table Container - Spaced Card Table matching Checker UI */}
           {loading ? (
-            <div style={{ padding: '3rem', textAlign: 'center', color: '#64748b' }}>
-              <RefreshCw size={24} className="animate-spin" style={{ margin: '0 auto 10px', color: '#2563eb' }} />
-              <div>Loading expenses...</div>
-            </div>
+            <LoadingScreen
+              message="Loading expense claims..."
+              subtext="Retrieving submitted claims and receipts."
+              size={40}
+            />
           ) : paginatedExpenses.length === 0 ? (
             <div style={{
               background: '#ffffff',
@@ -1246,7 +1552,7 @@ export default function MakerDashboard() {
               </p>
               {expenses.length === 0 && (
                 <button
-                  onClick={() => setActiveTab('submit')}
+                  onClick={() => setShowSubmitModal(true)}
                   className="btn btn-primary btn-sm"
                   style={{ marginTop: '1rem' }}
                 >
@@ -1280,6 +1586,25 @@ export default function MakerDashboard() {
                         setExpSortDir(dir);
                       }}
                       width="180px" style={{ width: '180px', minWidth: '180px' }}
+                    />
+                    <TableHeadSortMenu
+                      label="Amount (INR)"
+                      columnKey="amount"
+                      align="right"
+                      sortConfig={{ key: expSortKey, direction: expSortDir }}
+                      onSort={(key, dir) => {
+                        setExpSortKey(key);
+                        setExpSortDir(dir);
+                      }}
+                    />
+                    <TableHeadSortMenu
+                      label="Payee / Merchant"
+                      columnKey="payee"
+                      sortConfig={{ key: expSortKey, direction: expSortDir }}
+                      onSort={(key, dir) => {
+                        setExpSortKey(key);
+                        setExpSortDir(dir);
+                      }}
                     />
                     <TableHeadSortMenu
                       label="Status"
@@ -1318,27 +1643,8 @@ export default function MakerDashboard() {
                       }}
                     />
                     <TableHeadSortMenu
-                      label="Payee / Merchant"
-                      columnKey="payee"
-                      sortConfig={{ key: expSortKey, direction: expSortDir }}
-                      onSort={(key, dir) => {
-                        setExpSortKey(key);
-                        setExpSortDir(dir);
-                      }}
-                    />
-                    <TableHeadSortMenu
                       label="Description"
                       columnKey="desc"
-                      sortConfig={{ key: expSortKey, direction: expSortDir }}
-                      onSort={(key, dir) => {
-                        setExpSortKey(key);
-                        setExpSortDir(dir);
-                      }}
-                    />
-                    <TableHeadSortMenu
-                      label="Amount (INR)"
-                      columnKey="amount"
-                      align="right"
                       sortConfig={{ key: expSortKey, direction: expSortDir }}
                       onSort={(key, dir) => {
                         setExpSortKey(key);
@@ -1361,10 +1667,7 @@ export default function MakerDashboard() {
                               title="View claim history and approval details"
                             >
                               <Eye size={13} />
-                              <span className="table-btn-view-text">
-                                <span>View</span>
-                                <span>More</span>
-                              </span>
+                              <span>View Details</span>
                             </button>
 
                             {exp.status === 'SUBMITTED' && (
@@ -1379,6 +1682,10 @@ export default function MakerDashboard() {
                             )}
                           </div>
                         </td>
+                        <td style={{ textAlign: 'right', fontWeight: 700, color: '#0f172a', whiteSpace: 'nowrap' }}>
+                          ₹{exp.amount.toLocaleString('en-IN')}
+                        </td>
+                        <td style={{ fontWeight: 500, fontSize: '0.85rem' }}>{exp.payee}</td>
                         <td>{renderStatusBadge(exp.status, exp)}</td>
                         <td style={{ fontWeight: 700, color: '#0f172a', fontFamily: 'monospace' }}>
                           {exp.reference_number}
@@ -1396,14 +1703,10 @@ export default function MakerDashboard() {
                             {exp.category}
                           </span>
                         </td>
-                        <td style={{ fontWeight: 500, fontSize: '0.85rem' }}>{exp.payee}</td>
                         <td style={{ maxWidth: '240px', fontSize: '0.825rem', color: '#475569' }} title={exp.description}>
                           <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                             {exp.description}
                           </div>
-                        </td>
-                        <td style={{ textAlign: 'right', fontWeight: 700, color: '#0f172a', whiteSpace: 'nowrap' }}>
-                          ₹{exp.amount.toLocaleString('en-IN')}
                         </td>
                       </tr>
                     );
@@ -2148,10 +2451,7 @@ export default function MakerDashboard() {
                             title="View request details and review trail"
                           >
                             <Eye size={13} />
-                            <span className="table-btn-view-text">
-                              <span>View</span>
-                              <span>More</span>
-                            </span>
+                            <span>View Details</span>
                           </button>
 
                           {req.status === 'SUBMITTED' && (
@@ -2245,8 +2545,454 @@ export default function MakerDashboard() {
         </div>
       )}
 
+      
+      {/* VIEW 5: COMPLETE FINANCIAL HISTORY (FUNDS ALLOCATED & EXPENSES SPENT WITH DATE & TIME) */}
+      {activeTab === 'history' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          {/* Top Metric Cards */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gap: '1rem'
+          }}>
+            <div style={{
+              background: '#ffffff',
+              border: '1px solid #e2e8f0',
+              borderRadius: '12px',
+              padding: '1.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+            }}>
+              <div>
+                <span style={{ fontSize: '0.75rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>
+                  Funds Allocated (Total)
+                </span>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#16a34a', marginTop: '2px' }}>
+                  ₹{makerTotalAllocated.toLocaleString('en-IN')}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: '#15803d' }}>
+                  {makerAllocationsList.length} credit allocations received
+                </span>
+              </div>
+              <div style={{
+                width: '42px',
+                height: '42px',
+                borderRadius: '10px',
+                background: '#f0fdf4',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#16a34a'
+              }}>
+                <Wallet size={20} />
+              </div>
+            </div>
+
+            <div style={{
+              background: '#ffffff',
+              border: '1px solid #e2e8f0',
+              borderRadius: '12px',
+              padding: '1.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+            }}>
+              <div>
+                <span style={{ fontSize: '0.75rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>
+                  Funds Spent (Expenses)
+                </span>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#e11d48', marginTop: '2px' }}>
+                  ₹{makerTotalSpent.toLocaleString('en-IN')}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: '#be123c' }}>
+                  {makerExpensesList.length} total expense claims
+                </span>
+              </div>
+              <div style={{
+                width: '42px',
+                height: '42px',
+                borderRadius: '10px',
+                background: '#fff1f2',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#e11d48'
+              }}>
+                <ReceiptIndianRupee size={20} />
+              </div>
+            </div>
+
+            <div style={{
+              background: '#ffffff',
+              border: '1px solid #e2e8f0',
+              borderRadius: '12px',
+              padding: '1.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+            }}>
+              <div>
+                <span style={{ fontSize: '0.75rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>
+                  Available Balance
+                </span>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#0284c7', marginTop: '2px' }}>
+                  ₹{Math.max(0, (user?.allocated_funds || 0) - makerTotalSpent).toLocaleString('en-IN')}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: '#0369a1' }}>
+                  Current unspent limit
+                </span>
+              </div>
+              <div style={{
+                width: '42px',
+                height: '42px',
+                borderRadius: '10px',
+                background: '#f0f9ff',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#0284c7'
+              }}>
+                <CheckCircle2 size={20} />
+              </div>
+            </div>
+
+            <div style={{
+              background: '#ffffff',
+              border: '1px solid #e2e8f0',
+              borderRadius: '12px',
+              padding: '1.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+            }}>
+              <div>
+                <span style={{ fontSize: '0.75rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>
+                  Total Transactions
+                </span>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#0f172a', marginTop: '2px' }}>
+                  {makerAllocationsList.length + makerExpensesList.length}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                  All history events
+                </span>
+              </div>
+              <div style={{
+                width: '42px',
+                height: '42px',
+                borderRadius: '10px',
+                background: '#f8fafc',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#64748b'
+              }}>
+                <History size={20} />
+              </div>
+            </div>
+          </div>
+
+          {/* Table Card Container */}
+          <div style={{
+            background: '#ffffff',
+            border: '1px solid #e2e8f0',
+            borderRadius: '12px',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.02)',
+            overflow: 'hidden'
+          }}>
+            {/* Header Toolbar & Tabs */}
+            <div style={{
+              padding: '1rem 1.25rem',
+              borderBottom: '1px solid #f1f5f9',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '1rem'
+            }}>
+              {/* Sub-tabs */}
+              <div style={{ display: 'flex', gap: '6px', background: '#f1f5f9', padding: '4px', borderRadius: '8px' }}>
+                <button
+                  onClick={() => { setHistorySubTab('all'); setHistoryPage(1); }}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: '6px',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: historySubTab === 'all' ? '#ffffff' : 'transparent',
+                    color: historySubTab === 'all' ? '#0f172a' : '#64748b',
+                    boxShadow: historySubTab === 'all' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none'
+                  }}
+                >
+                  All History ({makerAllocationsList.length + makerExpensesList.length})
+                </button>
+                <button
+                  onClick={() => { setHistorySubTab('allocations'); setHistoryPage(1); }}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: '6px',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: historySubTab === 'allocations' ? '#ffffff' : 'transparent',
+                    color: historySubTab === 'allocations' ? '#16a34a' : '#64748b',
+                    boxShadow: historySubTab === 'allocations' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none'
+                  }}
+                >
+                  Funds Received ({makerAllocationsList.length})
+                </button>
+                <button
+                  onClick={() => { setHistorySubTab('expenses'); setHistoryPage(1); }}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: '6px',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: historySubTab === 'expenses' ? '#ffffff' : 'transparent',
+                    color: historySubTab === 'expenses' ? '#e11d48' : '#64748b',
+                    boxShadow: historySubTab === 'expenses' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none'
+                  }}
+                >
+                  Expenses Spent ({makerExpensesList.length})
+                </button>
+              </div>
+
+              {/* Search & Page Size */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{ position: 'relative' }}>
+                  <Search size={15} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+                  <input
+                    type="text"
+                    placeholder="Search payee, ref, notes..."
+                    value={historySearch}
+                    onChange={(e) => { setHistorySearch(e.target.value); setHistoryPage(1); }}
+                    className="form-input"
+                    style={{ paddingLeft: '32px', width: '220px', height: '36px', fontSize: '0.85rem' }}
+                  />
+                  {historySearch && (
+                    <button
+                      onClick={() => { setHistorySearch(''); setHistoryPage(1); }}
+                      style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+
+                <select
+                  value={historyPageSize}
+                  onChange={(e) => { setHistoryPageSize(Number(e.target.value)); setHistoryPage(1); }}
+                  className="form-input"
+                  style={{ width: '100px', height: '36px', fontSize: '0.825rem' }}
+                >
+                  <option value={10}>10 rows</option>
+                  <option value={25}>25 rows</option>
+                  <option value={50}>50 rows</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Table */}
+            <div className="table-responsive" style={{ width: '100%', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+              <table className="admin-table" style={{ width: '100%', minWidth: '1050px', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                    <th style={{ width: '50px', padding: '10px 12px', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', textAlign: 'center', whiteSpace: 'nowrap' }}>SR No.</th>
+                    <TableHeadSortMenu
+                      label="Date & Time"
+                      currentSort={historySortKey === 'date' ? historySortDir : null}
+                      onSortAsc={() => { setHistorySortKey('date'); setHistorySortDir('asc'); }}
+                      onSortDesc={() => { setHistorySortKey('date'); setHistorySortDir('desc'); }}
+                      onReset={() => { setHistorySortKey('date'); setHistorySortDir('desc'); }}
+                    />
+                    <th style={{ padding: '10px 12px', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', whiteSpace: 'nowrap' }}>Type</th>
+                    <th style={{ padding: '10px 12px', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', whiteSpace: 'nowrap' }}>Ref / Alloc #</th>
+                    <TableHeadSortMenu
+                      label="Where Spent / Allocated By"
+                      currentSort={historySortKey === 'entity' ? historySortDir : null}
+                      onSortAsc={() => { setHistorySortKey('entity'); setHistorySortDir('asc'); }}
+                      onSortDesc={() => { setHistorySortKey('entity'); setHistorySortDir('desc'); }}
+                      onReset={() => { setHistorySortKey('date'); setHistorySortDir('desc'); }}
+                    />
+                    <th style={{ padding: '10px 12px', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', whiteSpace: 'nowrap' }}>Category / Purpose</th>
+                    <TableHeadSortMenu
+                      label="Amount"
+                      currentSort={historySortKey === 'amount' ? historySortDir : null}
+                      onSortAsc={() => { setHistorySortKey('amount'); setHistorySortDir('asc'); }}
+                      onSortDesc={() => { setHistorySortKey('amount'); setHistorySortDir('desc'); }}
+                      onReset={() => { setHistorySortKey('date'); setHistorySortDir('desc'); }}
+                    />
+                    <th style={{ padding: '10px 12px', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', whiteSpace: 'nowrap' }}>Status / Balance</th>
+                    <th style={{ padding: '10px 12px', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', textAlign: 'center', whiteSpace: 'nowrap' }}>Receipt / Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedMakerHistory.length === 0 ? (
+                    <tr>
+                      <td colSpan="9" style={{ textAlign: 'center', padding: '3rem 1rem', color: '#94a3b8' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                          <History size={36} color="#cbd5e1" />
+                          <span style={{ fontSize: '0.95rem', fontWeight: 600, color: '#64748b' }}>No transaction history found</span>
+                          <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Funds allocated to you and expenses you submit will appear here with exact dates & times.</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    paginatedMakerHistory.map((item, idx) => {
+                      const isAlloc = item.type === 'ALLOCATION';
+                      return (
+                        <tr key={item.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ textAlign: 'center', fontSize: '0.8rem', color: '#94a3b8', padding: '10px 12px' }}>
+                            {(historyPage - 1) * historyPageSize + idx + 1}
+                          </td>
+                          <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.825rem', color: '#1e293b', fontWeight: 600 }}>
+                              <Clock size={13} color="#64748b" />
+                              <span>{item.dateFormatted}</span>
+                            </div>
+                          </td>
+                          <td style={{ padding: '10px 12px' }}>
+                            {isAlloc ? (
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                fontSize: '0.725rem',
+                                fontWeight: 700,
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                background: '#f0fdf4',
+                                color: '#16a34a',
+                                border: '1px solid #bbf7d0'
+                              }}>
+                                <Wallet size={12} />
+                                Fund Received
+                              </span>
+                            ) : (
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                fontSize: '0.725rem',
+                                fontWeight: 700,
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                background: '#fff1f2',
+                                color: '#e11d48',
+                                border: '1px solid #fecdd3'
+                              }}>
+                                <ReceiptIndianRupee size={12} />
+                                Expense Spent
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ padding: '10px 12px', fontWeight: 700, fontSize: '0.85rem', color: '#0f172a' }}>
+                            {item.refNumber}
+                          </td>
+                          <td style={{ padding: '10px 12px' }}>
+                            <div style={{ fontWeight: 600, fontSize: '0.85rem', color: '#0f172a' }}>
+                              {item.entity}
+                            </div>
+                            <span style={{ fontSize: '0.725rem', color: '#64748b' }}>
+                              {isAlloc ? `Allocated by ${item.role}` : 'Payee / Merchant'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '10px 12px' }}>
+                            <div style={{ fontSize: '0.825rem', fontWeight: 600, color: '#334155' }}>
+                              {item.category}
+                            </div>
+                            {item.notes && (
+                              <div style={{ fontSize: '0.725rem', color: '#64748b', maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.notes}>
+                                {item.notes}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ padding: '10px 12px', fontWeight: 800, fontSize: '0.9rem', color: isAlloc ? '#16a34a' : '#e11d48' }}>
+                            {isAlloc ? `+₹${item.amount.toLocaleString('en-IN')}` : `-₹${item.amount.toLocaleString('en-IN')}`}
+                          </td>
+                          <td style={{ padding: '10px 12px' }}>
+                            {isAlloc ? (
+                              <span style={{ fontSize: '0.75rem', color: '#0f172a', fontWeight: 600 }}>
+                                {item.balanceAfter != null ? `New Limit: ₹${item.balanceAfter.toLocaleString('en-IN')}` : 'Credit Added'}
+                              </span>
+                            ) : (
+                              renderStatusBadge(item.status, item.raw)
+                            )}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                            {item.receipt ? (
+                              <button
+                                onClick={() => setSelectedExpense(item.raw)}
+                                className="table-btn"
+                                style={{ padding: '4px 8px', fontSize: '0.75rem', background: '#f1f5f9', color: '#0284c7', border: '1px solid #e2e8f0', borderRadius: '4px', cursor: 'pointer' }}
+                                title="View Receipt"
+                              >
+                                <Eye size={12} style={{ marginRight: '3px' }} />
+                                View Details
+                              </button>
+                            ) : (
+                              <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination Controls */}
+            <div style={{
+              padding: '0.875rem 1.25rem',
+              borderTop: '1px solid #f1f5f9',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              fontSize: '0.825rem',
+              color: '#64748b'
+            }}>
+              <div>
+                Showing {filteredMakerHistory.length > 0 ? (historyPage - 1) * historyPageSize + 1 : 0} to {Math.min(filteredMakerHistory.length, historyPage * historyPageSize)} of {filteredMakerHistory.length} events
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <button
+                  onClick={() => setHistoryPage(p => Math.max(1, p - 1))}
+                  disabled={historyPage === 1}
+                  className="btn btn-secondary btn-sm"
+                  style={{ padding: '4px 8px' }}
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                <span style={{ padding: '0 8px', fontWeight: 600, color: '#1e293b' }}>
+                  {historyPage} / {historyTotalPages}
+                </span>
+                <button
+                  onClick={() => setHistoryPage(p => Math.min(historyTotalPages, p + 1))}
+                  disabled={historyPage === historyTotalPages}
+                  className="btn btn-secondary btn-sm"
+                  style={{ padding: '4px 8px' }}
+                >
+                  <ChevronRight size={16} />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+
       {/* 4. EXPENSE DETAILS MODAL (Workman Style with Full Approval Trail) */}
-      {selectedExpense && (
+      {selectedExpense && createPortal(
         <div className="modal-overlay-custom" onClick={() => setSelectedExpense(null)}>
           <div className="modal-content-lg" onClick={(e) => e.stopPropagation()}>
             {/* Modal Header */}
@@ -2560,11 +3306,12 @@ export default function MakerDashboard() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 5. ADDITIONAL FUND REQUEST DETAILS MODAL */}
-      {selectedFundReq && (
+      {selectedFundReq && createPortal(
         <div className="modal-overlay-custom" onClick={() => setSelectedFundReq(null)}>
           <div className="modal-content-lg" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '640px' }}>
             {/* Modal Header */}
@@ -2774,11 +3521,12 @@ export default function MakerDashboard() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 6. NEW ADDITIONAL FUND REQUEST MODAL */}
-      {showNewFundModal && (
+      {showNewFundModal && createPortal(
         <div className="modal-overlay-custom" onClick={() => setShowNewFundModal(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '540px' }}>
             <div style={{
@@ -2927,10 +3675,403 @@ export default function MakerDashboard() {
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Modal End */}
+
+      {/* Animated Fund Breakdown Popup Modal */}
+      {fundModalType && createPortal(
+        <div
+          className="fund-breakdown-modal-overlay"
+          onClick={() => setFundModalType(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="fund-breakdown-modal-container"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="fund-breakdown-header">
+              <div className="fund-breakdown-title-group">
+                <div className={`fund-breakdown-icon-box ${fundModalType}`}>
+                  {fundModalType === 'allocated' && <Wallet size={24} />}
+                  {fundModalType === 'used' && <ReceiptIndianRupee size={24} />}
+                  {fundModalType === 'remaining' && <FileText size={24} />}
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '1.18rem', fontWeight: 700, color: '#0f172a', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    {fundModalType === 'allocated' && 'Funds Allocated (All Employees)'}
+                    {fundModalType === 'used' && 'Funds Used (All Employees)'}
+                    {fundModalType === 'remaining' && 'Funds Remaining (All Employees)'}
+                  </h3>
+                  <p style={{ margin: '3px 0 0', fontSize: '0.8rem', color: '#64748b' }}>
+                    {fundModalType === 'allocated' && 'Displaying all Makers & Checkers sorted in decreasing order of allocated funds.'}
+                    {fundModalType === 'used' && 'Displaying all Makers & Checkers sorted in decreasing order of cumulative funds used.'}
+                    {fundModalType === 'remaining' && 'Displaying all Makers & Checkers sorted in decreasing order of remaining balance.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* View Switcher Tabs & Close Button */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div className="fund-breakdown-tabs">
+                  <button
+                    type="button"
+                    className={`fund-breakdown-tab-btn ${fundModalType === 'allocated' ? 'active' : ''}`}
+                    onClick={() => setFundModalType('allocated')}
+                  >
+                    <Wallet size={14} />
+                    <span>Allocated</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`fund-breakdown-tab-btn ${fundModalType === 'used' ? 'active' : ''}`}
+                    onClick={() => setFundModalType('used')}
+                  >
+                    <ReceiptIndianRupee size={14} />
+                    <span>Used</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`fund-breakdown-tab-btn ${fundModalType === 'remaining' ? 'active' : ''}`}
+                    onClick={() => setFundModalType('remaining')}
+                  >
+                    <FileText size={14} />
+                    <span>Remaining</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setFundModalType(null)}
+                  style={{
+                    background: '#f1f5f9',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: '#64748b',
+                    width: '32px',
+                    height: '32px',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'all 0.15s ease'
+                  }}
+                  title="Close modal (Esc)"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="fund-breakdown-body">
+              {/* Metric Summary Banner */}
+              <div className={`fund-breakdown-metric-banner ${fundModalType}`}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                  <div>
+                    <span style={{ fontSize: '0.75rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b' }}>
+                      {fundModalType === 'allocated' && 'Total Credit Limits Allocated Across Staff'}
+                      {fundModalType === 'used' && 'Total Cumulative Funds Used Across Staff'}
+                      {fundModalType === 'remaining' && 'Total Net Balance Remaining Across Staff'}
+                    </span>
+                    <div style={{
+                      fontSize: '1.5rem',
+                      fontWeight: 800,
+                      color: fundModalType === 'allocated' ? '#059669' : fundModalType === 'used' ? '#ea580c' : totalRemainingAllStaff < 0 ? '#dc2626' : '#2563eb'
+                    }}>
+                      {fundModalType === 'allocated' && `₹${totalAllocatedAllStaff.toLocaleString('en-IN')}`}
+                      {fundModalType === 'used' && `₹${totalUsedAllStaff.toLocaleString('en-IN')}`}
+                      {fundModalType === 'remaining' && (
+                        totalRemainingAllStaff < 0
+                          ? `-₹${Math.abs(totalRemainingAllStaff).toLocaleString('en-IN')}`
+                          : `₹${totalRemainingAllStaff.toLocaleString('en-IN')}`
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                  <span className="balance-pill-badge-light" style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '6px 12px' }}>
+                    <Users size={14} color="#64748b" />
+                    <strong>{staffBalanceBreakdown.length}</strong> Staff Members Displayed
+                  </span>
+                </div>
+              </div>
+
+              {/* Filters & Search Toolbar */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+                <div style={{ position: 'relative', flex: '1', minWidth: '240px', maxWidth: '380px' }}>
+                  <Search size={15} style={{ position: 'absolute', left: '11px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={fundModalSearch}
+                    onChange={(e) => setFundModalSearch(e.target.value)}
+                    placeholder="Search by name, ID, or department..."
+                    style={{ paddingLeft: '34px', fontSize: '0.85rem', height: '38px', borderRadius: '8px' }}
+                  />
+                  {fundModalSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setFundModalSearch('')}
+                      style={{
+                        position: 'absolute',
+                        right: '10px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: '#94a3b8'
+                      }}
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 500 }}>Filter Role:</span>
+                  <div style={{ display: 'flex', background: '#f1f5f9', padding: '2px', borderRadius: '6px', gap: '2px' }}>
+                    {['ALL', 'MAKER', 'CHECKER'].map((role) => (
+                      <button
+                        key={role}
+                        type="button"
+                        onClick={() => setFundModalRoleFilter(role)}
+                        style={{
+                          border: 'none',
+                          padding: '4px 10px',
+                          fontSize: '0.75rem',
+                          fontWeight: 600,
+                          borderRadius: '5px',
+                          cursor: 'pointer',
+                          background: fundModalRoleFilter === role ? '#ffffff' : 'transparent',
+                          color: fundModalRoleFilter === role ? '#0f172a' : '#64748b',
+                          boxShadow: fundModalRoleFilter === role ? '0 1px 2px rgba(0,0,0,0.06)' : 'none'
+                        }}
+                      >
+                        {role === 'ALL' ? 'All Roles' : role === 'MAKER' ? 'Makers' : 'Checkers'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Breakdown Table */}
+              <div className="fund-breakdown-table-wrapper">
+                <table className="fund-breakdown-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: '60px', textAlign: 'center' }}>SR No.</th>
+                      <th>Employee</th>
+                      <th style={{ width: '100px' }}>Role</th>
+                      <th>Department</th>
+                      <th
+                        className={fundModalType === 'allocated' ? 'highlight-col' : ''}
+                        style={{ textAlign: 'right', color: fundModalType === 'allocated' ? '#059669' : undefined }}
+                      >
+                        Funds Allocated {fundModalType === 'allocated' && '↓'}
+                      </th>
+                      <th
+                        className={fundModalType === 'used' ? 'highlight-col' : ''}
+                        style={{ textAlign: 'right', color: fundModalType === 'used' ? '#ea580c' : undefined }}
+                      >
+                        Funds Used {fundModalType === 'used' && '↓'}
+                      </th>
+                      <th
+                        className={fundModalType === 'remaining' ? 'highlight-col' : ''}
+                        style={{ textAlign: 'right', color: fundModalType === 'remaining' ? '#2563eb' : undefined }}
+                      >
+                        Funds Remaining {fundModalType === 'remaining' && '↓'}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {staffBalanceBreakdown.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} style={{ textAlign: 'center', padding: '40px 16px', color: '#64748b' }}>
+                          <AlertCircle size={28} color="#94a3b8" style={{ margin: '0 auto 8px', display: 'block' }} />
+                          <strong style={{ display: 'block', color: '#0f172a', marginBottom: '4px' }}>No Employees Found</strong>
+                          <span>No makers or checkers matched your search criteria.</span>
+                        </td>
+                      </tr>
+                    ) : (
+                      staffBalanceBreakdown.map((emp, index) => {
+                        const rank = index + 1;
+                        const rankClass = rank === 1 ? 'fund-rank-1' : rank === 2 ? 'fund-rank-2' : rank === 3 ? 'fund-rank-3' : 'fund-rank-default';
+                        const isDeficit = emp.remaining < 0;
+                        const isCurrentUser = emp.id === user?.id;
+
+                        return (
+                          <tr key={emp.id || index} style={isCurrentUser ? { background: '#f8fafc' } : undefined}>
+                            {/* SR Number with ranking badge */}
+                            <td style={{ textAlign: 'center' }}>
+                              <span className={`fund-rank-badge ${rankClass}`}>
+                                {rank}
+                              </span>
+                            </td>
+
+                            {/* Employee Info */}
+                            <td>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <div style={{
+                                  width: '32px',
+                                  height: '32px',
+                                  borderRadius: '50%',
+                                  background: emp.role === 'CHECKER' ? '#e0f2fe' : '#dcfce7',
+                                  color: emp.role === 'CHECKER' ? '#0369a1' : '#15803d',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  fontWeight: 700,
+                                  fontSize: '0.78rem',
+                                  flexShrink: 0
+                                }}>
+                                  {(emp.full_name || emp.username || 'U').charAt(0).toUpperCase()}
+                                </div>
+                                <div>
+                                  <div style={{ fontWeight: 600, color: '#0f172a', fontSize: '0.88rem' }}>
+                                    {emp.full_name || emp.username}
+                                    {isCurrentUser && (
+                                      <span style={{ marginLeft: '6px', fontSize: '0.7rem', background: '#dbeafe', color: '#1d4ed8', padding: '1px 6px', borderRadius: '4px', fontWeight: 600 }}>
+                                        You
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                                    {emp.employee_id ? `ID: ${emp.employee_id}` : emp.email || '—'}
+                                    {emp.designation && ` • ${emp.designation}`}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* Role Badge */}
+                            <td>
+                              <span style={{
+                                fontSize: '0.72rem',
+                                fontWeight: 700,
+                                padding: '3px 8px',
+                                borderRadius: '4px',
+                                background: emp.role === 'CHECKER' ? '#e0f2fe' : '#dcfce7',
+                                color: emp.role === 'CHECKER' ? '#0369a1' : '#15803d',
+                                display: 'inline-block'
+                              }}>
+                                {emp.role}
+                              </span>
+                            </td>
+
+                            {/* Department */}
+                            <td style={{ color: '#475569', fontSize: '0.84rem' }}>
+                              {emp.department || '—'}
+                            </td>
+
+                            {/* Funds Allocated */}
+                            <td
+                              className={fundModalType === 'allocated' ? 'highlight-col' : ''}
+                              style={{
+                                textAlign: 'right',
+                                whiteSpace: 'nowrap',
+                                fontWeight: fundModalType === 'allocated' ? 800 : 600,
+                                color: '#0f172a',
+                                fontSize: fundModalType === 'allocated' ? '0.92rem' : '0.86rem'
+                              }}
+                            >
+                              ₹{emp.allocated.toLocaleString('en-IN')}
+                            </td>
+
+                            {/* Funds Used */}
+                            <td
+                              className={fundModalType === 'used' ? 'highlight-col' : ''}
+                              style={{
+                                textAlign: 'right',
+                                whiteSpace: 'nowrap',
+                                fontWeight: fundModalType === 'used' ? 800 : 600,
+                                color: fundModalType === 'used' ? '#ea580c' : '#475569',
+                                fontSize: fundModalType === 'used' ? '0.92rem' : '0.86rem'
+                              }}
+                            >
+                              ₹{emp.used.toLocaleString('en-IN')}
+                            </td>
+
+                            {/* Funds Remaining */}
+                            <td
+                              className={fundModalType === 'remaining' ? 'highlight-col' : ''}
+                              style={{
+                                textAlign: 'right',
+                                whiteSpace: 'nowrap',
+                                fontWeight: fundModalType === 'remaining' ? 800 : 600,
+                                color: isDeficit ? '#dc2626' : fundModalType === 'remaining' ? '#2563eb' : '#16a34a',
+                                fontSize: fundModalType === 'remaining' ? '0.92rem' : '0.86rem'
+                              }}
+                            >
+                              {isDeficit ? `-₹${Math.abs(emp.remaining).toLocaleString('en-IN')}` : `₹${emp.remaining.toLocaleString('en-IN')}`}
+                              {isDeficit && (
+                                <span style={{
+                                  fontSize: '0.65rem',
+                                  background: '#fee2e2',
+                                  color: '#b91c1c',
+                                  padding: '1px 5px',
+                                  borderRadius: '4px',
+                                  marginLeft: '5px',
+                                  verticalAlign: 'middle',
+                                  fontWeight: 700
+                                }}>
+                                  Deficit
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div style={{
+              padding: '0.85rem 1.75rem',
+              borderTop: '1px solid #f1f5f9',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              background: '#f8fafc',
+              fontSize: '0.8rem',
+              color: '#64748b'
+            }}>
+              <span>
+                Sorted strictly in decreasing order based on active selection (<strong>{fundModalType}</strong>).
+              </span>
+              <button
+                type="button"
+                onClick={() => setFundModalType(null)}
+                className="btn btn-secondary btn-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Modern Unified Submit Expense Modal */}
+      <SubmitExpenseModal
+        isOpen={showSubmitModal}
+        onClose={() => setShowSubmitModal(false)}
+        currentUser={user}
+        onSuccess={(newExp) => {
+          loadData();
+          notify('success', `Expense claim ${newExp.reference_number || ''} of ₹${parseInt(newExp.amount, 10).toLocaleString('en-IN')} submitted successfully!`);
+        }}
+      />
+
     </div>
   );
 }
